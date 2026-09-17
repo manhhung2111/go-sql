@@ -47,3 +47,10 @@ type Token struct {
 	Value    string
 	Position int
 }
+
+type SqlStatement interface{}
+
+type SelectStatement struct {
+	Columns []string
+	Table   string
+}
