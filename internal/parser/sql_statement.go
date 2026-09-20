@@ -19,6 +19,9 @@ const (
 	AND
 	OR
 	NOT
+	INSERT
+	INTO
+	VALUES
 
 	// Operators
 	EQ
@@ -40,6 +43,7 @@ var tokenTypeMapping = map[string]TokenType{
 	";": SEMICOLON, ",": COMMA, "(": LPAREN, ")": RPAREN, "*": ASTERISK,
 	"=": EQ, "!=": NEQ, "<>": NEQ, "<": LT, "<=": LTE, ">": GT, ">=": GTE,
 	"SELECT": SELECT, "FROM": FROM, "WHERE": WHERE, "AND": AND, "OR": OR, "NOT": NOT,
+	"INSERT": INSERT, "INTO": INTO, "VALUES": VALUES,
 }
 
 type Token struct {
@@ -54,6 +58,12 @@ type SelectStatement struct {
 	Columns []string
 	Table   string
 	Where   Expression
+}
+
+type InsertIntoStatement struct {
+	Columns []string
+	Table   string
+	Values  [][]Token
 }
 
 type Expression interface{}

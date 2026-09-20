@@ -21,6 +21,12 @@ func (s *sqlParser) Parse() (SqlStatement, error) {
 	switch firstToken.Type {
 	case SELECT:
 		return s.parseSelectStatement()
+	case INSERT:
+		if s.expect(INTO) {
+			return s.parseInsertIntoStatement()
+		}
+
+		return nil, fmt.Errorf("INTO keyword must be expected after INSERT, got %s", s.peek().Value)
 	default:
 		return nil, fmt.Errorf("command not implemented, got %s", firstToken.Value)
 	}
@@ -64,6 +70,106 @@ func (s *sqlParser) parseSelectStatement() (SelectStatement, error) {
 	selectStatement.Table = table.Value
 
 	return selectStatement, nil
+}
+
+// "Insert into" statement grammar:
+//
+//	"INSERT INTO" tableName ("(" column ("," column)* ")")? "VALUES" valueRow ("," valueRow)*
+//	valueRow := "(" value ("," value)* ")"
+//	value    := NUMBER | STRING
+func (s *sqlParser) parseInsertIntoStatement() (InsertIntoStatement, error) {
+	table := s.advance()
+	if table.Type != IDENT {
+		return InsertIntoStatement{}, fmt.Errorf("expected table name, got %s", table.Value)
+	}
+
+	columns, err := s.parseInsertColumns()
+	if err != nil {
+		return InsertIntoStatement{}, err
+	}
+
+	if !s.expect(VALUES) {
+		return InsertIntoStatement{}, fmt.Errorf("expected VALUES, got %s", s.peek().Value)
+	}
+
+	values, err := s.parseInsertValues()
+	if err != nil {
+		return InsertIntoStatement{}, err
+	}
+
+	return InsertIntoStatement{Table: table.Value, Columns: columns, Values: values}, nil
+}
+
+// parseInsertColumns parses an optional "(" column ("," column)* ")" list,
+// returning an empty slice when no column list is given.
+func (s *sqlParser) parseInsertColumns() ([]string, error) {
+	if !s.expect(LPAREN) {
+		return []string{}, nil
+	}
+
+	columns := make([]string, 0)
+	for {
+		column := s.advance()
+		if column.Type != IDENT {
+			return nil, fmt.Errorf("expected column name, got %s", column.Value)
+		}
+		columns = append(columns, column.Value)
+
+		if !s.expect(COMMA) {
+			break
+		}
+	}
+
+	if !s.expect(RPAREN) {
+		return nil, fmt.Errorf("expected ')' after column list, got %s", s.peek().Value)
+	}
+
+	return columns, nil
+}
+
+// parseInsertValues parses one or more comma-separated value rows.
+func (s *sqlParser) parseInsertValues() ([][]Token, error) {
+	values := make([][]Token, 0)
+	for {
+		valueRow, err := s.parseValueRow()
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, valueRow)
+
+		if !s.expect(COMMA) {
+			break
+		}
+	}
+
+	return values, nil
+}
+
+// parseValueRow parses a single "(" value ("," value)* ")" row.
+func (s *sqlParser) parseValueRow() ([]Token, error) {
+	if !s.expect(LPAREN) {
+		return nil, fmt.Errorf("expected '(' before value list, got %s", s.peek().Value)
+	}
+
+	values := make([]Token, 0)
+	for {
+		value := s.peek()
+		if value.Type != STRING && value.Type != NUMBER {
+			return nil, fmt.Errorf("expected value, got %s", value.Value)
+		}
+		values = append(values, value)
+		s.advance()
+
+		if !s.expect(COMMA) {
+			break
+		}
+	}
+
+	if !s.expect(RPAREN) {
+		return nil, fmt.Errorf("expected ')' after value list, got %s", s.peek().Value)
+	}
+
+	return values, nil
 }
 
 func (s *sqlParser) parseSelectExpression() ([]string, error) {
