@@ -53,4 +53,19 @@ type SqlStatement interface{}
 type SelectStatement struct {
 	Columns []string
 	Table   string
+	Where   Expression
+}
+
+type Expression interface{}
+
+type BinaryExpression struct {
+	Left     Expression
+	Right    Expression
+	Operator TokenType // Must either be "AND" or "OR"
+}
+
+type ComparisonExpression struct {
+	Left     Token
+	Right    Token
+	Operator TokenType // Must be in ["=", "!=", "<>", ">=", ">", "<=", "<"]
 }
