@@ -111,9 +111,9 @@ func TestParse_NonIdentTable(t *testing.T) {
 }
 
 func TestParse_UnknownCommand(t *testing.T) {
-	_, err := parse(t, "DELETE users SET x")
+	_, err := parse(t, "MERGE users SET x")
 
-	assert.EqualError(t, err, "command not implemented, got DELETE")
+	assert.EqualError(t, err, "command not implemented, got MERGE")
 }
 
 func TestParse_WhereSingleComparison(t *testing.T) {
@@ -376,4 +376,32 @@ func TestParse_UpdateTrailingComma(t *testing.T) {
 	_, err := parse(t, "UPDATE users SET age = 30,")
 
 	assert.EqualError(t, err, "expected column name, got EOF")
+}
+
+func TestParse_DeleteWithoutWhere(t *testing.T) {
+	stmt, err := parse(t, "DELETE FROM users")
+
+	assert.NoError(t, err)
+	assert.Equal(t, DeleteStatement{Table: "users"}, stmt)
+}
+
+func TestParse_DeleteWithWhere(t *testing.T) {
+	stmt, err := parse(t, "DELETE FROM users WHERE age > 18")
+
+	assert.NoError(t, err)
+	del := stmt.(DeleteStatement)
+	assert.Equal(t, "users", del.Table)
+	assert.Equal(t, "age > 18", whereString(del.Where))
+}
+
+func TestParse_DeleteMissingFrom(t *testing.T) {
+	_, err := parse(t, "DELETE users")
+
+	assert.EqualError(t, err, "FROM keyword must be expected after DELETE, got users")
+}
+
+func TestParse_DeleteNonIdentTable(t *testing.T) {
+	_, err := parse(t, "DELETE FROM 123")
+
+	assert.EqualError(t, err, "expected table name, got 123")
 }

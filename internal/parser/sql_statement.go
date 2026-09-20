@@ -24,6 +24,7 @@ const (
 	VALUES
 	UPDATE
 	SET
+	DELETE
 
 	// Operators
 	EQ
@@ -45,7 +46,7 @@ var tokenTypeMapping = map[string]TokenType{
 	";": SEMICOLON, ",": COMMA, "(": LPAREN, ")": RPAREN, "*": ASTERISK,
 	"=": EQ, "!=": NEQ, "<>": NEQ, "<": LT, "<=": LTE, ">": GT, ">=": GTE,
 	"SELECT": SELECT, "FROM": FROM, "WHERE": WHERE, "AND": AND, "OR": OR, "NOT": NOT,
-	"INSERT": INSERT, "INTO": INTO, "VALUES": VALUES, "UPDATE": UPDATE, "SET": SET,
+	"INSERT": INSERT, "INTO": INTO, "VALUES": VALUES, "UPDATE": UPDATE, "SET": SET, "DELETE": DELETE,
 }
 
 type Token struct {
@@ -76,6 +77,11 @@ type Assignment struct {
 type UpdateStatement struct {
 	Table string
 	Set   []Assignment
+	Where Expression
+}
+
+type DeleteStatement struct {
+	Table string
 	Where Expression
 }
 

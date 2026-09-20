@@ -29,6 +29,13 @@ func (s *sqlParser) Parse() (SqlStatement, error) {
 		return nil, fmt.Errorf("INTO keyword must be expected after INSERT, got %s", s.peek().Value)
 	case UPDATE:
 		return s.parseUpdateStatement()
+
+	case DELETE:
+		if s.expect(FROM) {
+			return s.parseDeleteStatement()
+		}
+
+		return nil, fmt.Errorf("FROM keyword must be expected after DELETE, got %s", s.peek().Value)
 	default:
 		return nil, fmt.Errorf("command not implemented, got %s", firstToken.Value)
 	}
@@ -133,6 +140,26 @@ func (s *sqlParser) parseUpdateStatement() (UpdateStatement, error) {
 	}
 
 	return updateStatement, nil
+}
+
+func (s *sqlParser) parseDeleteStatement() (DeleteStatement, error) {
+	deleteStatement := DeleteStatement{}
+
+	table := s.advance()
+	if table.Type != IDENT {
+		return DeleteStatement{}, fmt.Errorf("expected table name, got %s", table.Value)
+	}
+
+	deleteStatement.Table = table.Value
+	if s.expect(WHERE) {
+		where, err := s.parseOrExpression()
+		if err != nil {
+			return DeleteStatement{}, err
+		}
+		deleteStatement.Where = where
+	}
+
+	return deleteStatement, nil
 }
 
 // parseSetClause parses one or more comma-separated "column = value"
