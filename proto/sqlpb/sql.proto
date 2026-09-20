@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package sqlpb;
+
+option go_package = "manhhung2111/go-sql/proto/sqlpb";
+
+message QueryRequest {
+  string sql = 1;
+}
+
+enum StatusCode {
+  OK = 0;
+  PARSE_ERROR = 1;
+}
+
+message QueryResponse {
+  StatusCode code = 1;
+  string error_message = 2; // empty when code == OK
+}
+
+service SqlParserService {
+  rpc ParseQuery(QueryRequest) returns (QueryResponse);
+}
