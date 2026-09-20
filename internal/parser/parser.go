@@ -27,6 +27,8 @@ func (s *sqlParser) Parse() (SqlStatement, error) {
 		}
 
 		return nil, fmt.Errorf("INTO keyword must be expected after INSERT, got %s", s.peek().Value)
+	case UPDATE:
+		return s.parseUpdateStatement()
 	default:
 		return nil, fmt.Errorf("command not implemented, got %s", firstToken.Value)
 	}
@@ -98,6 +100,76 @@ func (s *sqlParser) parseInsertIntoStatement() (InsertIntoStatement, error) {
 	}
 
 	return InsertIntoStatement{Table: table.Value, Columns: columns, Values: values}, nil
+}
+
+// "Update" statement grammar:
+//
+//	"UPDATE" table "SET" assignment ("," assignment)* ("WHERE" whereExpression)?
+//	assignment := column "=" value
+//	value      := NUMBER | STRING
+func (s *sqlParser) parseUpdateStatement() (UpdateStatement, error) {
+	table := s.advance()
+	if table.Type != IDENT {
+		return UpdateStatement{}, fmt.Errorf("expected table name, got %s", table.Value)
+	}
+
+	if !s.expect(SET) {
+		return UpdateStatement{}, fmt.Errorf("expected SET, got %s", s.peek().Value)
+	}
+
+	assignments, err := s.parseSetClause()
+	if err != nil {
+		return UpdateStatement{}, err
+	}
+
+	updateStatement := UpdateStatement{Table: table.Value, Set: assignments}
+
+	if s.expect(WHERE) {
+		where, err := s.parseOrExpression()
+		if err != nil {
+			return UpdateStatement{}, err
+		}
+		updateStatement.Where = where
+	}
+
+	return updateStatement, nil
+}
+
+// parseSetClause parses one or more comma-separated "column = value"
+// assignments, rejecting a column assigned more than once.
+func (s *sqlParser) parseSetClause() ([]Assignment, error) {
+	assignments := make([]Assignment, 0)
+	seen := make(map[string]bool)
+
+	for {
+		column := s.peek()
+		if column.Type != IDENT {
+			return nil, fmt.Errorf("expected column name, got %s", column.Value)
+		}
+		if seen[column.Value] {
+			return nil, fmt.Errorf("duplicate assignment for column %s", column.Value)
+		}
+		seen[column.Value] = true
+		s.advance()
+
+		if !s.expect(EQ) {
+			return nil, fmt.Errorf("expected '=', got %s", s.peek().Value)
+		}
+
+		value := s.peek()
+		if value.Type != STRING && value.Type != NUMBER {
+			return nil, fmt.Errorf("expected value, got %s", value.Value)
+		}
+		s.advance()
+
+		assignments = append(assignments, Assignment{Column: column.Value, Value: value})
+
+		if !s.expect(COMMA) {
+			break
+		}
+	}
+
+	return assignments, nil
 }
 
 // parseInsertColumns parses an optional "(" column ("," column)* ")" list,

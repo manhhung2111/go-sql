@@ -22,6 +22,8 @@ const (
 	INSERT
 	INTO
 	VALUES
+	UPDATE
+	SET
 
 	// Operators
 	EQ
@@ -43,7 +45,7 @@ var tokenTypeMapping = map[string]TokenType{
 	";": SEMICOLON, ",": COMMA, "(": LPAREN, ")": RPAREN, "*": ASTERISK,
 	"=": EQ, "!=": NEQ, "<>": NEQ, "<": LT, "<=": LTE, ">": GT, ">=": GTE,
 	"SELECT": SELECT, "FROM": FROM, "WHERE": WHERE, "AND": AND, "OR": OR, "NOT": NOT,
-	"INSERT": INSERT, "INTO": INTO, "VALUES": VALUES,
+	"INSERT": INSERT, "INTO": INTO, "VALUES": VALUES, "UPDATE": UPDATE, "SET": SET,
 }
 
 type Token struct {
@@ -64,6 +66,17 @@ type InsertIntoStatement struct {
 	Columns []string
 	Table   string
 	Values  [][]Token
+}
+
+type Assignment struct {
+	Column string
+	Value  Token
+}
+
+type UpdateStatement struct {
+	Table string
+	Set   []Assignment
+	Where Expression
 }
 
 type Expression interface{}

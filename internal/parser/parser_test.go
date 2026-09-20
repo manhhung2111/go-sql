@@ -27,6 +27,16 @@ func valueStrings(rows [][]Token) [][]string {
 	return out
 }
 
+// setStrings renders []Assignment as "column=value" pairs so tests can
+// assert on content without hard-coding token Position values.
+func setStrings(set []Assignment) []string {
+	out := make([]string, len(set))
+	for i, a := range set {
+		out[i] = fmt.Sprintf("%s=%s", a.Column, a.Value.Value)
+	}
+	return out
+}
+
 var operatorSymbols = map[TokenType]string{
 	EQ: "=", NEQ: "!=", LT: "<", LTE: "<=", GT: ">", GTE: ">=", AND: "AND", OR: "OR",
 }
@@ -101,9 +111,9 @@ func TestParse_NonIdentTable(t *testing.T) {
 }
 
 func TestParse_UnknownCommand(t *testing.T) {
-	_, err := parse(t, "UPDATE users SET x")
+	_, err := parse(t, "DELETE users SET x")
 
-	assert.EqualError(t, err, "command not implemented, got UPDATE")
+	assert.EqualError(t, err, "command not implemented, got DELETE")
 }
 
 func TestParse_WhereSingleComparison(t *testing.T) {
@@ -295,4 +305,75 @@ func TestParse_InsertEmptyColumnListLowercaseValuesDoubleQuotedStrings(t *testin
 	_, err := parse(t, `INSERT INTO users () values ("abc", "DEF")`)
 
 	assert.EqualError(t, err, "expected column name, got )")
+}
+
+func TestParse_UpdateSingleAssignment(t *testing.T) {
+	stmt, err := parse(t, "UPDATE users SET age = 30")
+
+	assert.NoError(t, err)
+	upd := stmt.(UpdateStatement)
+	assert.Equal(t, "users", upd.Table)
+	assert.Equal(t, []string{"age=30"}, setStrings(upd.Set))
+	assert.Nil(t, upd.Where)
+}
+
+func TestParse_UpdateMultipleAssignments(t *testing.T) {
+	stmt, err := parse(t, "UPDATE users SET age = 30, name = 'bob'")
+
+	assert.NoError(t, err)
+	upd := stmt.(UpdateStatement)
+	assert.Equal(t, "users", upd.Table)
+	assert.Equal(t, []string{"age=30", "name=bob"}, setStrings(upd.Set))
+}
+
+func TestParse_UpdateWithWhere(t *testing.T) {
+	stmt, err := parse(t, "UPDATE users SET age = 30 WHERE id = 1")
+
+	assert.NoError(t, err)
+	upd := stmt.(UpdateStatement)
+	assert.Equal(t, "users", upd.Table)
+	assert.Equal(t, []string{"age=30"}, setStrings(upd.Set))
+	assert.Equal(t, "id = 1", whereString(upd.Where))
+}
+
+func TestParse_UpdateNonIdentTable(t *testing.T) {
+	_, err := parse(t, "UPDATE 123 SET age = 30")
+
+	assert.EqualError(t, err, "expected table name, got 123")
+}
+
+func TestParse_UpdateMissingSet(t *testing.T) {
+	_, err := parse(t, "UPDATE users age = 30")
+
+	assert.EqualError(t, err, "expected SET, got age")
+}
+
+func TestParse_UpdateNonIdentColumn(t *testing.T) {
+	_, err := parse(t, "UPDATE users SET 1 = 30")
+
+	assert.EqualError(t, err, "expected column name, got 1")
+}
+
+func TestParse_UpdateMissingEquals(t *testing.T) {
+	_, err := parse(t, "UPDATE users SET age 30")
+
+	assert.EqualError(t, err, "expected '=', got 30")
+}
+
+func TestParse_UpdateNonLiteralValue(t *testing.T) {
+	_, err := parse(t, "UPDATE users SET age = name")
+
+	assert.EqualError(t, err, "expected value, got name")
+}
+
+func TestParse_UpdateDuplicateColumn(t *testing.T) {
+	_, err := parse(t, "UPDATE users SET age = 1, age = 2")
+
+	assert.EqualError(t, err, "duplicate assignment for column age")
+}
+
+func TestParse_UpdateTrailingComma(t *testing.T) {
+	_, err := parse(t, "UPDATE users SET age = 30,")
+
+	assert.EqualError(t, err, "expected column name, got EOF")
 }
