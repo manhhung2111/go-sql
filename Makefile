@@ -1,4 +1,4 @@
-.PHONY: test proto
+.PHONY: test proto generate
 
 .DEFAULT_GOAL := test
 
@@ -11,3 +11,6 @@ proto:
 		--go_out=proto/sqlpb --go_opt=paths=source_relative \
 		--go-grpc_out=proto/sqlpb --go-grpc_opt=paths=source_relative \
 		sql.proto
+
+generate:
+	wire ./internal/wiring

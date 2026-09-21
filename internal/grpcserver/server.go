@@ -3,16 +3,18 @@ package grpcserver
 import (
 	"context"
 
+	"manhhung2111/go-sql/internal/config"
 	"manhhung2111/go-sql/internal/parser"
 	"manhhung2111/go-sql/proto/sqlpb"
 )
 
 type Server struct {
 	sqlpb.UnimplementedSqlParserServiceServer
+	config *config.Config
 }
 
-func New() *Server {
-	return &Server{}
+func NewServer(cfg *config.Config) *Server {
+	return &Server{config: cfg}
 }
 
 func (s *Server) ParseQuery(_ context.Context, req *sqlpb.QueryRequest) (*sqlpb.QueryResponse, error) {

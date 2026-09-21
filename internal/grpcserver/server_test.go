@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
+	"manhhung2111/go-sql/internal/config"
 	"manhhung2111/go-sql/proto/sqlpb"
 )
 
@@ -21,7 +22,7 @@ func newTestClient(t *testing.T) sqlpb.SqlParserServiceClient {
 	t.Cleanup(func() { lis.Close() })
 
 	grpcServer := grpc.NewServer()
-	sqlpb.RegisterSqlParserServiceServer(grpcServer, New())
+	sqlpb.RegisterSqlParserServiceServer(grpcServer, NewServer(&config.Config{}))
 	go grpcServer.Serve(lis)
 	t.Cleanup(grpcServer.Stop)
 
