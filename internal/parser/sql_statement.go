@@ -25,6 +25,11 @@ const (
 	UPDATE
 	SET
 	DELETE
+	CREATE
+	DATABASE
+	SHOW
+	DATABASES
+	DROP
 
 	// Operators
 	EQ
@@ -47,6 +52,7 @@ var tokenTypeMapping = map[string]TokenType{
 	"=": EQ, "!=": NEQ, "<>": NEQ, "<": LT, "<=": LTE, ">": GT, ">=": GTE,
 	"SELECT": SELECT, "FROM": FROM, "WHERE": WHERE, "AND": AND, "OR": OR, "NOT": NOT,
 	"INSERT": INSERT, "INTO": INTO, "VALUES": VALUES, "UPDATE": UPDATE, "SET": SET, "DELETE": DELETE,
+	"CREATE": CREATE, "DATABASE": DATABASE, "SHOW": SHOW, "DATABASES": DATABASES, "DROP": DROP,
 }
 
 type Token struct {
@@ -84,6 +90,16 @@ type DeleteStatement struct {
 	Table string
 	Where Expression
 }
+
+type CreateDatabaseStatement struct {
+	Database string
+}
+
+type DropDatabaseStatement struct {
+	Database string
+}
+
+type ShowDatabasesStatement struct{}
 
 type Expression interface{}
 

@@ -405,3 +405,73 @@ func TestParse_DeleteNonIdentTable(t *testing.T) {
 
 	assert.EqualError(t, err, "expected table name, got 123")
 }
+
+func TestParse_CreateDatabase(t *testing.T) {
+	stmt, err := parse(t, "CREATE DATABASE mydb")
+
+	assert.NoError(t, err)
+	assert.Equal(t, CreateDatabaseStatement{Database: "mydb"}, stmt)
+}
+
+func TestParse_CreateMissingDatabaseKeyword(t *testing.T) {
+	_, err := parse(t, "CREATE mydb")
+
+	assert.EqualError(t, err, "DATABASE keyword must be expected after CREATE, got mydb")
+}
+
+func TestParse_CreateNonIdentDatabase(t *testing.T) {
+	_, err := parse(t, "CREATE DATABASE 123")
+
+	assert.EqualError(t, err, "expected database name, got 123")
+}
+
+func TestParse_DropDatabase(t *testing.T) {
+	stmt, err := parse(t, "DROP DATABASE mydb")
+
+	assert.NoError(t, err)
+	assert.Equal(t, DropDatabaseStatement{Database: "mydb"}, stmt)
+}
+
+func TestParse_DropMissingDatabaseKeyword(t *testing.T) {
+	_, err := parse(t, "DROP mydb")
+
+	assert.EqualError(t, err, "DATABASE keyword must be expected after DROP, got mydb")
+}
+
+func TestParse_DropNonIdentDatabase(t *testing.T) {
+	_, err := parse(t, "DROP DATABASE 123")
+
+	assert.EqualError(t, err, "expected database name, got 123")
+}
+
+func TestParse_ShowDatabases(t *testing.T) {
+	stmt, err := parse(t, "SHOW DATABASES")
+
+	assert.NoError(t, err)
+	assert.Equal(t, ShowDatabasesStatement{}, stmt)
+}
+
+func TestParse_ShowMissingDatabasesKeyword(t *testing.T) {
+	_, err := parse(t, "SHOW TABLES")
+
+	assert.EqualError(t, err, "DATABASES keyword must be expected after SHOW, got TABLES")
+}
+
+func TestParse_TrailingSemicolonAllowed(t *testing.T) {
+	stmt, err := parse(t, "SELECT * FROM users;")
+
+	assert.NoError(t, err)
+	assert.Equal(t, SelectStatement{Columns: []string{"*"}, Table: "users"}, stmt)
+}
+
+func TestParse_TrailingGarbageAfterStatement(t *testing.T) {
+	_, err := parse(t, "SELECT * FROM users EXTRA")
+
+	assert.EqualError(t, err, "unexpected token after statement, got EXTRA")
+}
+
+func TestParse_TrailingStatementAfterSemicolonRejected(t *testing.T) {
+	_, err := parse(t, "SELECT * FROM users; SELECT 1")
+
+	assert.EqualError(t, err, "unexpected token after statement, got SELECT")
+}

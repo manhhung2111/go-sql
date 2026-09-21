@@ -18,27 +18,68 @@ func NewParser(tokens []Token) Parser {
 func (s *sqlParser) Parse() (SqlStatement, error) {
 	firstToken := s.advance()
 
+	var (
+		stmt SqlStatement
+		err  error
+	)
+
 	switch firstToken.Type {
 	case SELECT:
-		return s.parseSelectStatement()
+		stmt, err = s.parseSelectStatement()
 	case INSERT:
-		if s.expect(INTO) {
-			return s.parseInsertIntoStatement()
+		if !s.expect(INTO) {
+			return nil, fmt.Errorf("INTO keyword must be expected after INSERT, got %s", s.peek().Value)
 		}
-
-		return nil, fmt.Errorf("INTO keyword must be expected after INSERT, got %s", s.peek().Value)
+		stmt, err = s.parseInsertIntoStatement()
 	case UPDATE:
-		return s.parseUpdateStatement()
-
+		stmt, err = s.parseUpdateStatement()
 	case DELETE:
-		if s.expect(FROM) {
-			return s.parseDeleteStatement()
+		if !s.expect(FROM) {
+			return nil, fmt.Errorf("FROM keyword must be expected after DELETE, got %s", s.peek().Value)
+		}
+		stmt, err = s.parseDeleteStatement()
+	case CREATE:
+		if !s.expect(DATABASE) {
+			return nil, fmt.Errorf("DATABASE keyword must be expected after CREATE, got %s", s.peek().Value)
+		}
+		stmt, err = s.parseCreateDatabaseStatement()
+	case DROP:
+		if !s.expect(DATABASE) {
+			return nil, fmt.Errorf("DATABASE keyword must be expected after DROP, got %s", s.peek().Value)
 		}
 
-		return nil, fmt.Errorf("FROM keyword must be expected after DELETE, got %s", s.peek().Value)
+		stmt, err = s.parseDropDatabaseStatement()
+	case SHOW:
+		if !s.expect(DATABASES) {
+			return nil, fmt.Errorf("DATABASES keyword must be expected after SHOW, got %s", s.peek().Value)
+		}
+		stmt, err = s.parseShowDatabasesStatement()
 	default:
 		return nil, fmt.Errorf("command not implemented, got %s", firstToken.Value)
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.expectEnd(); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// expectEnd consumes an optional trailing SEMICOLON and rejects any tokens
+// left after it, catching trailing garbage after an otherwise valid
+// statement (e.g. "SELECT * FROM users EXTRA").
+func (s *sqlParser) expectEnd() error {
+	s.expect(SEMICOLON)
+
+	if token := s.peek(); token.Type != EOF {
+		return fmt.Errorf("unexpected token after statement, got %s", token.Value)
+	}
+
+	return nil
 }
 
 // Select statement grammar:
@@ -160,6 +201,31 @@ func (s *sqlParser) parseDeleteStatement() (DeleteStatement, error) {
 	}
 
 	return deleteStatement, nil
+}
+
+// "CREATE" "DATABASE" database_name;
+func (s *sqlParser) parseCreateDatabaseStatement() (CreateDatabaseStatement, error) {
+	database := s.advance()
+	if database.Type != IDENT {
+		return CreateDatabaseStatement{}, fmt.Errorf("expected database name, got %s", database.Value)
+	}
+
+	return CreateDatabaseStatement{Database: database.Value}, nil
+}
+
+// "DROP" "DATABASE" database_name;
+func (s *sqlParser) parseDropDatabaseStatement() (DropDatabaseStatement, error) {
+	database := s.advance()
+	if database.Type != IDENT {
+		return DropDatabaseStatement{}, fmt.Errorf("expected database name, got %s", database.Value)
+	}
+
+	return DropDatabaseStatement{Database: database.Value}, nil
+}
+
+// "SHOW" "DATABASES"
+func (s *sqlParser) parseShowDatabasesStatement() (ShowDatabasesStatement, error) {
+	return ShowDatabasesStatement{}, nil
 }
 
 // parseSetClause parses one or more comma-separated "column = value"
