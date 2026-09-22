@@ -50,11 +50,13 @@ func (s *sqlParser) Parse() (SqlStatement, error) {
 			return nil, fmt.Errorf("DATABASE keyword must be expected after CREATE, got %s", s.peek().Value)
 		}
 	case DROP:
-		if !s.expect(DATABASE) {
-			return nil, fmt.Errorf("DATABASE keyword must be expected after DROP, got %s", s.peek().Value)
+		if s.expect(DATABASE) {
+			stmt, err = s.parseDropDatabaseStatement()
+		} else if s.expect(TABLE) {
+			stmt, err = s.parseDropTableStatement()
+		} else {
+			return nil, fmt.Errorf("DATABASE or TABLE keyword must be expected after DROP, got %s", s.peek().Value)
 		}
-
-		stmt, err = s.parseDropDatabaseStatement()
 	case SHOW:
 		if !s.expect(DATABASES) {
 			return nil, fmt.Errorf("DATABASES keyword must be expected after SHOW, got %s", s.peek().Value)
@@ -235,6 +237,26 @@ func (s *sqlParser) parseDropDatabaseStatement() (DropDatabaseStatement, error) 
 	}
 
 	return DropDatabaseStatement{Database: database.Value}, nil
+}
+
+// "DROP" "TABLE" ("IF" "EXISTS")? table_name;
+func (s *sqlParser) parseDropTableStatement() (DropTableStatement, error) {
+	dropTableStatement := DropTableStatement{}
+
+	if s.expect(IF) {
+		if !s.expect(EXISTS) {
+			return DropTableStatement{}, fmt.Errorf("expected EXISTS after IF, got %s", s.peek().Value)
+		}
+		dropTableStatement.IfExists = true
+	}
+
+	table := s.advance()
+	if table.Type != IDENT {
+		return DropTableStatement{}, fmt.Errorf("expected table name, got %s", table.Value)
+	}
+	dropTableStatement.Table = table.Value
+
+	return dropTableStatement, nil
 }
 
 // "SHOW" "DATABASES"

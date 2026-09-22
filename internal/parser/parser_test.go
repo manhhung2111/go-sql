@@ -491,16 +491,42 @@ func TestParse_DropDatabase(t *testing.T) {
 	assert.Equal(t, DropDatabaseStatement{Database: "mydb"}, stmt)
 }
 
-func TestParse_DropMissingDatabaseKeyword(t *testing.T) {
+func TestParse_DropMissingDatabaseOrTableKeyword(t *testing.T) {
 	_, err := parse(t, "DROP mydb")
 
-	assert.EqualError(t, err, "DATABASE keyword must be expected after DROP, got mydb")
+	assert.EqualError(t, err, "DATABASE or TABLE keyword must be expected after DROP, got mydb")
 }
 
 func TestParse_DropNonIdentDatabase(t *testing.T) {
 	_, err := parse(t, "DROP DATABASE 123")
 
 	assert.EqualError(t, err, "expected database name, got 123")
+}
+
+func TestParse_DropTable(t *testing.T) {
+	stmt, err := parse(t, "DROP TABLE users")
+
+	assert.NoError(t, err)
+	assert.Equal(t, DropTableStatement{Table: "users"}, stmt)
+}
+
+func TestParse_DropTableNonIdentTable(t *testing.T) {
+	_, err := parse(t, "DROP TABLE 123")
+
+	assert.EqualError(t, err, "expected table name, got 123")
+}
+
+func TestParse_DropTableIfExists(t *testing.T) {
+	stmt, err := parse(t, "DROP TABLE IF EXISTS users")
+
+	assert.NoError(t, err)
+	assert.Equal(t, DropTableStatement{Table: "users", IfExists: true}, stmt)
+}
+
+func TestParse_DropTableMissingExistsAfterIf(t *testing.T) {
+	_, err := parse(t, "DROP TABLE IF users")
+
+	assert.EqualError(t, err, "expected EXISTS after IF, got users")
 }
 
 func TestParse_ShowDatabases(t *testing.T) {

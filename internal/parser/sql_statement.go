@@ -126,6 +126,11 @@ type DropDatabaseStatement struct {
 	Database string
 }
 
+type DropTableStatement struct {
+	Table    string
+	IfExists bool
+}
+
 type ShowDatabasesStatement struct{}
 
 type CreateTableStatement struct {
