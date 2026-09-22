@@ -60,6 +60,11 @@ func (s *sqlParser) Parse() (SqlStatement, error) {
 			return nil, fmt.Errorf("DATABASES keyword must be expected after SHOW, got %s", s.peek().Value)
 		}
 		stmt, err = s.parseShowDatabasesStatement()
+	case ALTER:
+		if !s.expect(TABLE) {
+			return nil, fmt.Errorf("TABLE keyword must be expected after ALTER, got %s", s.peek().Value)
+		}
+		stmt, err = s.parseAlterTableStatement()
 	default:
 		return nil, fmt.Errorf("command not implemented, got %s", firstToken.Value)
 	}
@@ -271,54 +276,10 @@ func (s *sqlParser) parseCreateTableStatement() (CreateTableStatement, error) {
 
 	columns := make([]ColumnDefinition, 0)
 	for {
-		columnDefinition := ColumnDefinition{}
-
-		column := s.peek()
-		if column.Type != IDENT && column.Type != STRING {
-			return CreateTableStatement{}, fmt.Errorf("expected column name, got %s", column.Value)
-		}
-		columnDefinition.Name = column.Value
-		s.advance()
-
-		dataType := s.peek()
-		if !isDataType(dataType.Type) {
-			return CreateTableStatement{}, fmt.Errorf("expected data type, got %s", dataType.Value)
-		}
-		columnDataType, err := getDataType(dataType.Type)
+		columnDefinition, err := s.parseColumnDefinition()
 		if err != nil {
 			return CreateTableStatement{}, err
 		}
-
-		columnDefinition.DataType = columnDataType
-		s.advance()
-
-		if s.expect(LPAREN) {
-			sizeToken := s.peek()
-			if sizeToken.Type != NUMBER {
-				return CreateTableStatement{}, fmt.Errorf("expected size in data type, got %s", sizeToken.Value)
-			}
-			s.advance()
-
-			if !s.expect(RPAREN) {
-				return CreateTableStatement{}, fmt.Errorf("expected ')' after size in data type, got %s", s.peek().Value)
-			}
-
-			size, err := strconv.Atoi(sizeToken.Value)
-			if err != nil {
-				return CreateTableStatement{}, fmt.Errorf("invalid size %s: %v", sizeToken.Value, err)
-			}
-
-			columnDefinition.DataType, err = applyDataTypeSize(columnDefinition.DataType, size)
-			if err != nil {
-				return CreateTableStatement{}, err
-			}
-		}
-
-		constraints, err := s.parseColumnConstraints()
-		if err != nil {
-			return CreateTableStatement{}, err
-		}
-		columnDefinition.Constraints = constraints
 
 		columns = append(columns, columnDefinition)
 		if !s.expect(COMMA) {
@@ -332,6 +293,135 @@ func (s *sqlParser) parseCreateTableStatement() (CreateTableStatement, error) {
 
 	createTableStatement.Columns = columns
 	return createTableStatement, nil
+}
+
+// parseColumnDefinition parses a single "name datatype ('(' size ')')?
+// constraint*" column definition, shared by CREATE TABLE's column list and
+// ALTER TABLE's ADD COLUMN action.
+func (s *sqlParser) parseColumnDefinition() (ColumnDefinition, error) {
+	columnDefinition := ColumnDefinition{}
+
+	column := s.peek()
+	if column.Type != IDENT && column.Type != STRING {
+		return ColumnDefinition{}, fmt.Errorf("expected column name, got %s", column.Value)
+	}
+	columnDefinition.Name = column.Value
+	s.advance()
+
+	dataType := s.peek()
+	if !isDataType(dataType.Type) {
+		return ColumnDefinition{}, fmt.Errorf("expected data type, got %s", dataType.Value)
+	}
+	columnDataType, err := getDataType(dataType.Type)
+	if err != nil {
+		return ColumnDefinition{}, err
+	}
+
+	columnDefinition.DataType = columnDataType
+	s.advance()
+
+	if s.expect(LPAREN) {
+		sizeToken := s.peek()
+		if sizeToken.Type != NUMBER {
+			return ColumnDefinition{}, fmt.Errorf("expected size in data type, got %s", sizeToken.Value)
+		}
+		s.advance()
+
+		if !s.expect(RPAREN) {
+			return ColumnDefinition{}, fmt.Errorf("expected ')' after size in data type, got %s", s.peek().Value)
+		}
+
+		size, err := strconv.Atoi(sizeToken.Value)
+		if err != nil {
+			return ColumnDefinition{}, fmt.Errorf("invalid size %s: %v", sizeToken.Value, err)
+		}
+
+		columnDefinition.DataType, err = applyDataTypeSize(columnDefinition.DataType, size)
+		if err != nil {
+			return ColumnDefinition{}, err
+		}
+	}
+
+	constraints, err := s.parseColumnConstraints()
+	if err != nil {
+		return ColumnDefinition{}, err
+	}
+	columnDefinition.Constraints = constraints
+
+	return columnDefinition, nil
+}
+
+// "ALTER" "TABLE" table_name alterAction
+//
+//	alterAction :=
+//	    "ADD" "COLUMN"? column_definition
+//	  | "DROP" "COLUMN"? column_name
+//	  | "RENAME" "COLUMN" old_name "TO" new_name
+//	  | "RENAME" "TO" new_table_name
+func (s *sqlParser) parseAlterTableStatement() (AlterTableStatement, error) {
+	table := s.advance()
+	if table.Type != IDENT {
+		return AlterTableStatement{}, fmt.Errorf("expected table name, got %s", table.Value)
+	}
+
+	action, err := s.parseAlterAction()
+	if err != nil {
+		return AlterTableStatement{}, err
+	}
+
+	return AlterTableStatement{Table: table.Value, Action: action}, nil
+}
+
+func (s *sqlParser) parseAlterAction() (AlterAction, error) {
+	switch {
+	case s.expect(ADD):
+		s.expect(COLUMN)
+
+		column, err := s.parseColumnDefinition()
+		if err != nil {
+			return nil, err
+		}
+		return AddColumnAction{Column: column}, nil
+	case s.expect(DROP):
+		s.expect(COLUMN)
+
+		column := s.advance()
+		if column.Type != IDENT {
+			return nil, fmt.Errorf("expected column name, got %s", column.Value)
+		}
+		return DropColumnAction{Column: column.Value}, nil
+	case s.expect(RENAME):
+		if s.expect(COLUMN) {
+			oldName := s.advance()
+			if oldName.Type != IDENT {
+				return nil, fmt.Errorf("expected column name, got %s", oldName.Value)
+			}
+
+			if !s.expect(TO) {
+				return nil, fmt.Errorf("expected TO after RENAME COLUMN %s, got %s", oldName.Value, s.peek().Value)
+			}
+
+			newName := s.advance()
+			if newName.Type != IDENT {
+				return nil, fmt.Errorf("expected column name, got %s", newName.Value)
+			}
+
+			return RenameColumnAction{OldName: oldName.Value, NewName: newName.Value}, nil
+		}
+
+		if !s.expect(TO) {
+			return nil, fmt.Errorf("expected COLUMN or TO after RENAME, got %s", s.peek().Value)
+		}
+
+		newName := s.advance()
+		if newName.Type != IDENT {
+			return nil, fmt.Errorf("expected table name, got %s", newName.Value)
+		}
+
+		return RenameTableAction{NewName: newName.Value}, nil
+	default:
+		return nil, fmt.Errorf("expected ADD, DROP or RENAME after table name, got %s", s.peek().Value)
+	}
 }
 
 // parseSetClause parses one or more comma-separated "column = value"

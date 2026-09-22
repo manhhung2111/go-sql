@@ -686,3 +686,123 @@ func TestParse_CreateTableMissingCloseParenAfterColumnList(t *testing.T) {
 		})
 	}
 }
+
+func TestParse_AlterTableAddColumn(t *testing.T) {
+	stmt, err := parse(t, "ALTER TABLE users ADD COLUMN age INT NOT NULL")
+
+	assert.NoError(t, err)
+	assert.Equal(t, AlterTableStatement{
+		Table: "users",
+		Action: AddColumnAction{
+			Column: ColumnDefinition{
+				Name:        "age",
+				DataType:    IntDataType{},
+				Constraints: []Constraint{NotNullConstraint{}},
+			},
+		},
+	}, stmt)
+}
+
+func TestParse_AlterTableAddColumnWithoutColumnKeyword(t *testing.T) {
+	stmt, err := parse(t, "ALTER TABLE users ADD age INT")
+
+	assert.NoError(t, err)
+	alt := stmt.(AlterTableStatement)
+	assert.Equal(t, AddColumnAction{
+		Column: ColumnDefinition{Name: "age", DataType: IntDataType{}, Constraints: []Constraint{}},
+	}, alt.Action)
+}
+
+func TestParse_AlterTableDropColumn(t *testing.T) {
+	stmt, err := parse(t, "ALTER TABLE users DROP COLUMN age")
+
+	assert.NoError(t, err)
+	assert.Equal(t, AlterTableStatement{
+		Table:  "users",
+		Action: DropColumnAction{Column: "age"},
+	}, stmt)
+}
+
+func TestParse_AlterTableDropColumnWithoutColumnKeyword(t *testing.T) {
+	stmt, err := parse(t, "ALTER TABLE users DROP age")
+
+	assert.NoError(t, err)
+	assert.Equal(t, AlterTableStatement{
+		Table:  "users",
+		Action: DropColumnAction{Column: "age"},
+	}, stmt)
+}
+
+func TestParse_AlterTableRenameColumn(t *testing.T) {
+	stmt, err := parse(t, "ALTER TABLE users RENAME COLUMN age TO years")
+
+	assert.NoError(t, err)
+	assert.Equal(t, AlterTableStatement{
+		Table:  "users",
+		Action: RenameColumnAction{OldName: "age", NewName: "years"},
+	}, stmt)
+}
+
+func TestParse_AlterTableRenameTo(t *testing.T) {
+	stmt, err := parse(t, "ALTER TABLE users RENAME TO people")
+
+	assert.NoError(t, err)
+	assert.Equal(t, AlterTableStatement{
+		Table:  "users",
+		Action: RenameTableAction{NewName: "people"},
+	}, stmt)
+}
+
+func TestParse_AlterTableMissingTableKeyword(t *testing.T) {
+	_, err := parse(t, "ALTER users ADD COLUMN age INT")
+
+	assert.EqualError(t, err, "TABLE keyword must be expected after ALTER, got users")
+}
+
+func TestParse_AlterTableNonIdentTableName(t *testing.T) {
+	_, err := parse(t, "ALTER TABLE 123 ADD COLUMN age INT")
+
+	assert.EqualError(t, err, "expected table name, got 123")
+}
+
+func TestParse_AlterTableUnknownAction(t *testing.T) {
+	_, err := parse(t, "ALTER TABLE users MODIFY age INT")
+
+	assert.EqualError(t, err, "expected ADD, DROP or RENAME after table name, got MODIFY")
+}
+
+func TestParse_AlterTableAddColumnNonIdentName(t *testing.T) {
+	_, err := parse(t, "ALTER TABLE users ADD COLUMN 123 INT")
+
+	assert.EqualError(t, err, "expected column name, got 123")
+}
+
+func TestParse_AlterTableDropColumnNonIdentName(t *testing.T) {
+	_, err := parse(t, "ALTER TABLE users DROP 123")
+
+	assert.EqualError(t, err, "expected column name, got 123")
+}
+
+func TestParse_AlterTableRenameColumnMissingTo(t *testing.T) {
+	_, err := parse(t, "ALTER TABLE users RENAME COLUMN age")
+
+	assert.EqualError(t, err, "expected TO after RENAME COLUMN age, got EOF")
+}
+
+func TestParse_AlterTableRenameColumnNonIdentNewName(t *testing.T) {
+	_, err := parse(t, "ALTER TABLE users RENAME COLUMN age TO 123")
+
+	assert.EqualError(t, err, "expected column name, got 123")
+}
+
+func TestParse_AlterTableRenameMissingColumnOrTo(t *testing.T) {
+	_, err := parse(t, "ALTER TABLE users RENAME 123")
+
+	assert.EqualError(t, err, "expected COLUMN or TO after RENAME, got 123")
+}
+
+func TestParse_AlterTableRenameToNonIdentName(t *testing.T) {
+	_, err := parse(t, "ALTER TABLE users RENAME TO 123")
+
+	assert.EqualError(t, err, "expected table name, got 123")
+}

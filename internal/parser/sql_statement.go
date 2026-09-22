@@ -38,6 +38,11 @@ const (
 	UNIQUE
 	PRIMARY
 	KEY
+	ALTER
+	ADD
+	COLUMN
+	RENAME
+	TO
 
 	// Operators
 	EQ
@@ -74,6 +79,7 @@ var tokenTypeMapping = map[string]TokenType{
 	"TABLE": TABLE, "IF": IF, "EXISTS": EXISTS, "NULL": NULL, "DEFAULT": DEFAULT, "UNIQUE": UNIQUE,
 	"PRIMARY": PRIMARY, "KEY": KEY, "CHAR": CHAR, "VARCHAR": VARCHAR, "TEXT": TEXT, "BOOLEAN": BOOLEAN,
 	"BOOL": BOOLEAN, "SMALLINT": SMALLINT, "MEDIUMINT": MEDIUMINT, "INT": INT, "BIGINT": BIGINT,
+	"ALTER": ALTER, "ADD": ADD, "COLUMN": COLUMN, "RENAME": RENAME, "TO": TO,
 }
 
 type Token struct {
@@ -132,6 +138,30 @@ type ColumnDefinition struct {
 	Name        string
 	DataType    DataType
 	Constraints []Constraint
+}
+
+type AlterTableStatement struct {
+	Table  string
+	Action AlterAction
+}
+
+type AlterAction interface{}
+
+type AddColumnAction struct {
+	Column ColumnDefinition
+}
+
+type DropColumnAction struct {
+	Column string
+}
+
+type RenameColumnAction struct {
+	OldName string
+	NewName string
+}
+
+type RenameTableAction struct {
+	NewName string
 }
 
 type Expression interface{}
