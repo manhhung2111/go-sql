@@ -1,6 +1,9 @@
 package parser
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 type Parser interface {
 	Parse() (SqlStatement, error)
@@ -39,10 +42,13 @@ func (s *sqlParser) Parse() (SqlStatement, error) {
 		}
 		stmt, err = s.parseDeleteStatement()
 	case CREATE:
-		if !s.expect(DATABASE) {
+		if s.expect(DATABASE) {
+			stmt, err = s.parseCreateDatabaseStatement()
+		} else if s.expect(TABLE) {
+			stmt, err = s.parseCreateTableStatement()
+		} else {
 			return nil, fmt.Errorf("DATABASE keyword must be expected after CREATE, got %s", s.peek().Value)
 		}
-		stmt, err = s.parseCreateDatabaseStatement()
 	case DROP:
 		if !s.expect(DATABASE) {
 			return nil, fmt.Errorf("DATABASE keyword must be expected after DROP, got %s", s.peek().Value)
@@ -183,6 +189,9 @@ func (s *sqlParser) parseUpdateStatement() (UpdateStatement, error) {
 	return updateStatement, nil
 }
 
+// "Delete" statement grammar:
+//
+//	"DELETE" "FROM" table ("WHERE" whereExpression)?
 func (s *sqlParser) parseDeleteStatement() (DeleteStatement, error) {
 	deleteStatement := DeleteStatement{}
 
@@ -226,6 +235,103 @@ func (s *sqlParser) parseDropDatabaseStatement() (DropDatabaseStatement, error) 
 // "SHOW" "DATABASES"
 func (s *sqlParser) parseShowDatabasesStatement() (ShowDatabasesStatement, error) {
 	return ShowDatabasesStatement{}, nil
+}
+
+// "CREATE" "TABLE" table_name (
+//
+//	column1 datatype constraint,
+//	column2 datatype constraint,
+//	column3 datatype constraint,
+//	....
+//
+// );
+func (s *sqlParser) parseCreateTableStatement() (CreateTableStatement, error) {
+	createTableStatement := CreateTableStatement{}
+
+	if s.expect(IF) {
+		if !s.expect(NOT) {
+			return CreateTableStatement{}, fmt.Errorf("expected NOT after IF, got %s", s.peek().Value)
+		}
+
+		if !s.expect(EXISTS) {
+			return CreateTableStatement{}, fmt.Errorf("expected EXISTS after IF NOT, got %s", s.peek().Value)
+		}
+		createTableStatement.IfNotExists = true
+	}
+
+	table := s.advance()
+	if table.Type != IDENT {
+		return CreateTableStatement{}, fmt.Errorf("expected table name, got %s", table.Value)
+	}
+	createTableStatement.Table = table.Value
+
+	if !s.expect(LPAREN) {
+		return CreateTableStatement{}, fmt.Errorf("expected '(' before column list, got %s", s.peek().Value)
+	}
+
+	columns := make([]ColumnDefinition, 0)
+	for {
+		columnDefinition := ColumnDefinition{}
+
+		column := s.peek()
+		if column.Type != IDENT && column.Type != STRING {
+			return CreateTableStatement{}, fmt.Errorf("expected column name, got %s", column.Value)
+		}
+		columnDefinition.Name = column.Value
+		s.advance()
+
+		dataType := s.peek()
+		if !isDataType(dataType.Type) {
+			return CreateTableStatement{}, fmt.Errorf("expected data type, got %s", dataType.Value)
+		}
+		columnDataType, err := getDataType(dataType.Type)
+		if err != nil {
+			return CreateTableStatement{}, err
+		}
+
+		columnDefinition.DataType = columnDataType
+		s.advance()
+
+		if s.expect(LPAREN) {
+			sizeToken := s.peek()
+			if sizeToken.Type != NUMBER {
+				return CreateTableStatement{}, fmt.Errorf("expected size in data type, got %s", sizeToken.Value)
+			}
+			s.advance()
+
+			if !s.expect(RPAREN) {
+				return CreateTableStatement{}, fmt.Errorf("expected ')' after size in data type, got %s", s.peek().Value)
+			}
+
+			size, err := strconv.Atoi(sizeToken.Value)
+			if err != nil {
+				return CreateTableStatement{}, fmt.Errorf("invalid size %s: %v", sizeToken.Value, err)
+			}
+
+			columnDefinition.DataType, err = applyDataTypeSize(columnDefinition.DataType, size)
+			if err != nil {
+				return CreateTableStatement{}, err
+			}
+		}
+
+		constraints, err := s.parseColumnConstraints()
+		if err != nil {
+			return CreateTableStatement{}, err
+		}
+		columnDefinition.Constraints = constraints
+
+		columns = append(columns, columnDefinition)
+		if !s.expect(COMMA) {
+			break
+		}
+	}
+
+	if !s.expect(RPAREN) {
+		return CreateTableStatement{}, fmt.Errorf("expected ')' after column list, got %s", s.peek().Value)
+	}
+
+	createTableStatement.Columns = columns
+	return createTableStatement, nil
 }
 
 // parseSetClause parses one or more comma-separated "column = value"
@@ -429,6 +535,103 @@ func isComparisonOperator(t TokenType) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func isDataType(t TokenType) bool {
+	switch t {
+	case CHAR, VARCHAR, TEXT, BOOLEAN, SMALLINT, MEDIUMINT, INT, BIGINT:
+		return true
+	default:
+		return false
+	}
+}
+
+func getDataType(t TokenType) (DataType, error) {
+	switch t {
+	case CHAR:
+		return CharDataType{}, nil
+	case VARCHAR:
+		return VarCharDataType{}, nil
+	case TEXT:
+		return TextDataType{}, nil
+	case BOOLEAN:
+		return BooleanDataType{}, nil
+	case SMALLINT:
+		return SmallIntDataType{}, nil
+	case MEDIUMINT:
+		return MediumIntDataType{}, nil
+	case INT:
+		return IntDataType{}, nil
+	case BIGINT:
+		return BigIntDataType{}, nil
+	default:
+		return nil, fmt.Errorf("unknown data type %d", t)
+	}
+}
+
+// applyDataTypeSize sets the "(<size>)" argument on data types that accept
+// one, and rejects it on types that don't (e.g. "BOOLEAN(5)").
+func applyDataTypeSize(dataType DataType, size int) (DataType, error) {
+	switch dt := dataType.(type) {
+	case CharDataType:
+		dt.Size = size
+		return dt, nil
+	case VarCharDataType:
+		dt.Size = size
+		return dt, nil
+	case TextDataType:
+		dt.Size = size
+		return dt, nil
+	case SmallIntDataType:
+		dt.Size = size
+		return dt, nil
+	case MediumIntDataType:
+		dt.Size = size
+		return dt, nil
+	case IntDataType:
+		dt.Size = size
+		return dt, nil
+	default:
+		return nil, fmt.Errorf("%T does not accept a size argument", dataType)
+	}
+}
+
+// parseColumnConstraints parses zero or more constraint keywords following a
+// column's data type (e.g. "NOT NULL", "PRIMARY KEY", "DEFAULT 0", "UNIQUE"),
+// stopping at the first token that isn't a constraint keyword without
+// consuming it.
+func (s *sqlParser) parseColumnConstraints() ([]Constraint, error) {
+	constraints := make([]Constraint, 0)
+
+	for {
+		switch s.peek().Type {
+		case NOT:
+			s.advance()
+			if !s.expect(NULL) {
+				return nil, fmt.Errorf("expected NULL after NOT constraint, got %s", s.peek().Value)
+			}
+			constraints = append(constraints, NotNullConstraint{})
+		case UNIQUE:
+			s.advance()
+			constraints = append(constraints, UniqueConstraint{})
+		case PRIMARY:
+			s.advance()
+			if !s.expect(KEY) {
+				return nil, fmt.Errorf("expected KEY after PRIMARY constraint, got %s", s.peek().Value)
+			}
+			constraints = append(constraints, PrimaryKeyConstraint{})
+		case DEFAULT:
+			s.advance()
+			defaultValue := s.peek()
+			if defaultValue.Type != STRING && defaultValue.Type != NUMBER {
+				return nil, fmt.Errorf("expected String or Number default value for DEFAULT constraint, got %s", defaultValue.Value)
+			}
+			s.advance()
+			constraints = append(constraints, DefaultConstraint{DefaultValue: defaultValue})
+		default:
+			return constraints, nil
+		}
 	}
 }
 

@@ -30,6 +30,14 @@ const (
 	SHOW
 	DATABASES
 	DROP
+	TABLE
+	IF
+	EXISTS
+	NULL
+	DEFAULT
+	UNIQUE
+	PRIMARY
+	KEY
 
 	// Operators
 	EQ
@@ -45,6 +53,16 @@ const (
 	LPAREN
 	RPAREN
 	ASTERISK
+
+	// Data types
+	CHAR
+	VARCHAR
+	TEXT
+	BOOLEAN
+	SMALLINT
+	MEDIUMINT
+	INT
+	BIGINT
 )
 
 var tokenTypeMapping = map[string]TokenType{
@@ -53,6 +71,9 @@ var tokenTypeMapping = map[string]TokenType{
 	"SELECT": SELECT, "FROM": FROM, "WHERE": WHERE, "AND": AND, "OR": OR, "NOT": NOT,
 	"INSERT": INSERT, "INTO": INTO, "VALUES": VALUES, "UPDATE": UPDATE, "SET": SET, "DELETE": DELETE,
 	"CREATE": CREATE, "DATABASE": DATABASE, "SHOW": SHOW, "DATABASES": DATABASES, "DROP": DROP,
+	"TABLE": TABLE, "IF": IF, "EXISTS": EXISTS, "NULL": NULL, "DEFAULT": DEFAULT, "UNIQUE": UNIQUE,
+	"PRIMARY": PRIMARY, "KEY": KEY, "CHAR": CHAR, "VARCHAR": VARCHAR, "TEXT": TEXT, "BOOLEAN": BOOLEAN,
+	"BOOL": BOOLEAN, "SMALLINT": SMALLINT, "MEDIUMINT": MEDIUMINT, "INT": INT, "BIGINT": BIGINT,
 }
 
 type Token struct {
@@ -100,6 +121,18 @@ type DropDatabaseStatement struct {
 }
 
 type ShowDatabasesStatement struct{}
+
+type CreateTableStatement struct {
+	Table       string
+	IfNotExists bool
+	Columns     []ColumnDefinition
+}
+
+type ColumnDefinition struct {
+	Name        string
+	DataType    DataType
+	Constraints []Constraint
+}
 
 type Expression interface{}
 

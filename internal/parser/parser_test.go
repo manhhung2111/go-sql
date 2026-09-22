@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,6 +36,64 @@ func setStrings(set []Assignment) []string {
 		out[i] = fmt.Sprintf("%s=%s", a.Column, a.Value.Value)
 	}
 	return out
+}
+
+// columnDefinitionStrings renders []ColumnDefinition as canonical
+// "name TYPE(size) CONSTRAINT..." strings so tests can assert on column
+// shape without hard-coding the token Position values inside DEFAULT
+// constraints.
+func columnDefinitionStrings(columns []ColumnDefinition) []string {
+	out := make([]string, len(columns))
+	for i, c := range columns {
+		def := fmt.Sprintf("%s %s", c.Name, dataTypeString(c.DataType))
+		if len(c.Constraints) > 0 {
+			def += " " + constraintStrings(c.Constraints)
+		}
+		out[i] = def
+	}
+	return out
+}
+
+func dataTypeString(dt DataType) string {
+	switch d := dt.(type) {
+	case CharDataType:
+		return fmt.Sprintf("CHAR(%d)", d.Size)
+	case VarCharDataType:
+		return fmt.Sprintf("VARCHAR(%d)", d.Size)
+	case TextDataType:
+		return fmt.Sprintf("TEXT(%d)", d.Size)
+	case BooleanDataType:
+		return "BOOLEAN"
+	case SmallIntDataType:
+		return fmt.Sprintf("SMALLINT(%d)", d.Size)
+	case MediumIntDataType:
+		return fmt.Sprintf("MEDIUMINT(%d)", d.Size)
+	case IntDataType:
+		return fmt.Sprintf("INT(%d)", d.Size)
+	case BigIntDataType:
+		return "BIGINT"
+	default:
+		return fmt.Sprintf("unexpected data type %T", dt)
+	}
+}
+
+func constraintStrings(constraints []Constraint) string {
+	parts := make([]string, len(constraints))
+	for i, c := range constraints {
+		switch v := c.(type) {
+		case NotNullConstraint:
+			parts[i] = "NOT NULL"
+		case UniqueConstraint:
+			parts[i] = "UNIQUE"
+		case PrimaryKeyConstraint:
+			parts[i] = "PRIMARY KEY"
+		case DefaultConstraint:
+			parts[i] = fmt.Sprintf("DEFAULT %s", v.DefaultValue.Value)
+		default:
+			parts[i] = fmt.Sprintf("unexpected constraint %T", c)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 var operatorSymbols = map[TokenType]string{
@@ -474,4 +533,156 @@ func TestParse_TrailingStatementAfterSemicolonRejected(t *testing.T) {
 	_, err := parse(t, "SELECT * FROM users; SELECT 1")
 
 	assert.EqualError(t, err, "unexpected token after statement, got SELECT")
+}
+
+func TestParse_CreateTableSingleColumn(t *testing.T) {
+	stmt, err := parse(t, "CREATE TABLE foo (id INT)")
+
+	assert.NoError(t, err)
+	tbl := stmt.(CreateTableStatement)
+	assert.Equal(t, "foo", tbl.Table)
+	assert.False(t, tbl.IfNotExists)
+	assert.Equal(t, []string{"id INT(0)"}, columnDefinitionStrings(tbl.Columns))
+}
+
+func TestParse_CreateTableMultipleColumnsWithSizesAndConstraints(t *testing.T) {
+	stmt, err := parse(t, "CREATE TABLE foo (id INT PRIMARY KEY, name VARCHAR(50) NOT NULL, active BOOLEAN DEFAULT 1)")
+
+	assert.NoError(t, err)
+	tbl := stmt.(CreateTableStatement)
+	assert.Equal(t, "foo", tbl.Table)
+	assert.Equal(t, []string{
+		"id INT(0) PRIMARY KEY",
+		"name VARCHAR(50) NOT NULL",
+		"active BOOLEAN DEFAULT 1",
+	}, columnDefinitionStrings(tbl.Columns))
+}
+
+func TestParse_CreateTableMultipleConstraintsSameColumn(t *testing.T) {
+	stmt, err := parse(t, "CREATE TABLE foo (id INT NOT NULL UNIQUE PRIMARY KEY)")
+
+	assert.NoError(t, err)
+	tbl := stmt.(CreateTableStatement)
+	assert.Equal(t, []string{"id INT(0) NOT NULL UNIQUE PRIMARY KEY"}, columnDefinitionStrings(tbl.Columns))
+}
+
+func TestParse_CreateTableIfNotExists(t *testing.T) {
+	stmt, err := parse(t, "CREATE TABLE IF NOT EXISTS foo (id INT)")
+
+	assert.NoError(t, err)
+	tbl := stmt.(CreateTableStatement)
+	assert.True(t, tbl.IfNotExists)
+}
+
+func TestParse_CreateTableQuotedColumnName(t *testing.T) {
+	stmt, err := parse(t, `CREATE TABLE foo ('id' INT)`)
+
+	assert.NoError(t, err)
+	tbl := stmt.(CreateTableStatement)
+	assert.Equal(t, []string{"id INT(0)"}, columnDefinitionStrings(tbl.Columns))
+}
+
+func TestParse_CreateTableMissingNotAfterIf(t *testing.T) {
+	_, err := parse(t, "CREATE TABLE IF EXISTS foo (id INT)")
+
+	assert.EqualError(t, err, "expected NOT after IF, got EXISTS")
+}
+
+func TestParse_CreateTableMissingExistsAfterIfNot(t *testing.T) {
+	_, err := parse(t, "CREATE TABLE IF NOT foo (id INT)")
+
+	assert.EqualError(t, err, "expected EXISTS after IF NOT, got foo")
+}
+
+func TestParse_CreateTableNonIdentTableName(t *testing.T) {
+	_, err := parse(t, "CREATE TABLE 123 (id INT)")
+
+	assert.EqualError(t, err, "expected table name, got 123")
+}
+
+func TestParse_CreateTableMissingOpenParen(t *testing.T) {
+	_, err := parse(t, "CREATE TABLE foo id INT)")
+
+	assert.EqualError(t, err, "expected '(' before column list, got id")
+}
+
+func TestParse_CreateTableNonIdentColumnName(t *testing.T) {
+	_, err := parse(t, "CREATE TABLE foo (123 INT)")
+
+	assert.EqualError(t, err, "expected column name, got 123")
+}
+
+func TestParse_CreateTableUnknownDataType(t *testing.T) {
+	_, err := parse(t, "CREATE TABLE foo (id UNKNOWNTYPE)")
+
+	assert.EqualError(t, err, "expected data type, got UNKNOWNTYPE")
+}
+
+func TestParse_CreateTableNonNumberSize(t *testing.T) {
+	_, err := parse(t, "CREATE TABLE foo (id VARCHAR(abc))")
+
+	assert.EqualError(t, err, "expected size in data type, got abc")
+}
+
+func TestParse_CreateTableMissingCloseParenAfterSize(t *testing.T) {
+	_, err := parse(t, "CREATE TABLE foo (id VARCHAR(50 name INT)")
+
+	assert.EqualError(t, err, "expected ')' after size in data type, got name")
+}
+
+func TestParse_CreateTableUnsupportedSizeDataType(t *testing.T) {
+	_, err := parse(t, "CREATE TABLE foo (id BOOLEAN(5))")
+
+	assert.EqualError(t, err, "parser.BooleanDataType does not accept a size argument")
+}
+
+func TestParse_CreateTableMissingNullAfterNot(t *testing.T) {
+	tests := []struct {
+		sql string
+		err string
+	}{
+		{"CREATE TABLE foo (id INT NOT", "expected NULL after NOT constraint, got EOF"},
+		{"CREATE TABLE foo (id INT NOT 5)", "expected NULL after NOT constraint, got 5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			_, err := parse(t, tt.sql)
+			assert.EqualError(t, err, tt.err)
+		})
+	}
+}
+
+func TestParse_CreateTableMissingKeyAfterPrimary(t *testing.T) {
+	tests := []struct {
+		sql string
+		err string
+	}{
+		{"CREATE TABLE foo (id INT PRIMARY", "expected KEY after PRIMARY constraint, got EOF"},
+		{"CREATE TABLE foo (id INT PRIMARY 5)", "expected KEY after PRIMARY constraint, got 5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			_, err := parse(t, tt.sql)
+			assert.EqualError(t, err, tt.err)
+		})
+	}
+}
+
+func TestParse_CreateTableNonLiteralDefaultValue(t *testing.T) {
+	_, err := parse(t, "CREATE TABLE foo (id INT DEFAULT name)")
+
+	assert.EqualError(t, err, "expected String or Number default value for DEFAULT constraint, got name")
+}
+
+func TestParse_CreateTableMissingCloseParenAfterColumnList(t *testing.T) {
+	tests := []string{
+		"CREATE TABLE foo (id INT",
+		"CREATE TABLE foo (id INT, name VARCHAR(50)",
+	}
+	for _, sql := range tests {
+		t.Run(sql, func(t *testing.T) {
+			_, err := parse(t, sql)
+			assert.EqualError(t, err, "expected ')' after column list, got EOF")
+		})
+	}
 }
