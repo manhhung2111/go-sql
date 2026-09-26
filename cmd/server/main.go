@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"google.golang.org/grpc"
 
@@ -36,9 +39,22 @@ func main() {
 	grpcServer := grpc.NewServer()
 	sqlpb.RegisterSqlParserServiceServer(grpcServer, server)
 
-	log.Printf("sql-parser gRPC server listening on %s", addr)
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("server stopped: %v", err)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	serveErr := make(chan error, 1)
+	go func() {
+		log.Printf("sql-parser gRPC server listening on %s", addr)
+		serveErr <- grpcServer.Serve(lis)
+	}()
+
+	select {
+	case err := <-serveErr:
+		log.Fatalf("server stopped unexpectedly: %v", err)
+	case <-ctx.Done():
+		log.Println("shutdown signal received, stopping gracefully...")
+		grpcServer.GracefulStop()
+		log.Println("server stopped")
 	}
 }
 
