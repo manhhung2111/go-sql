@@ -246,3 +246,176 @@ func TestTable_InsertValues_NullExemptFromUniqueness(t *testing.T) {
 	assert.Nil(t, table.Rows[0][1])
 	assert.Nil(t, table.Rows[1][1])
 }
+
+func TestTable_AlterColumns_AddColumn_EmptyTable(t *testing.T) {
+	table := usersTable(t)
+
+	err := table.AlterColumns(parser.AddColumnAction{
+		Column: parser.ColumnDefinition{Name: "age", DataType: parser.IntDataType{}},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, table.Columns, 3)
+	assert.Equal(t, "age", table.Columns[2].Name)
+}
+
+func TestTable_AlterColumns_AddColumn_BackfillsDefault(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+	}))
+
+	err := table.AlterColumns(parser.AddColumnAction{
+		Column: parser.ColumnDefinition{
+			Name:        "age",
+			DataType:    parser.IntDataType{},
+			Constraints: []parser.Constraint{parser.DefaultConstraint{DefaultValue: numTok("18")}},
+		},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, table.Rows[0], 3)
+	assert.Equal(t, int64(18), table.Rows[0][2])
+	assert.Equal(t, int64(18), table.Rows[1][2])
+}
+
+func TestTable_AlterColumns_AddColumn_BackfillsNull(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	err := table.AlterColumns(parser.AddColumnAction{
+		Column: parser.ColumnDefinition{Name: "age", DataType: parser.IntDataType{}},
+	})
+
+	require.NoError(t, err)
+	assert.Nil(t, table.Rows[0][2])
+}
+
+func TestTable_AlterColumns_AddColumn_NotNullWithoutDefaultRejected(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	err := table.AlterColumns(parser.AddColumnAction{
+		Column: parser.ColumnDefinition{
+			Name:        "age",
+			DataType:    parser.IntDataType{},
+			Constraints: []parser.Constraint{parser.NotNullConstraint{}},
+		},
+	})
+
+	assert.EqualError(t, err, `field "age" doesn't have a default value`)
+	assert.Len(t, table.Columns, 2, "a rejected ADD COLUMN must not partially apply")
+}
+
+func TestTable_AlterColumns_AddColumn_UniqueWithDefaultRejectedOnMultipleRows(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+	}))
+
+	err := table.AlterColumns(parser.AddColumnAction{
+		Column: parser.ColumnDefinition{
+			Name:     "region",
+			DataType: parser.VarCharDataType{Size: 10},
+			Constraints: []parser.Constraint{
+				parser.UniqueConstraint{},
+				parser.DefaultConstraint{DefaultValue: strTok("us")},
+			},
+		},
+	})
+
+	assert.EqualError(t, err, `duplicate entry us for column "region"`)
+	assert.Len(t, table.Columns, 2, "a rejected ADD COLUMN must not partially apply")
+}
+
+func TestTable_AlterColumns_AddColumn_DuplicateName(t *testing.T) {
+	table := usersTable(t)
+
+	err := table.AlterColumns(parser.AddColumnAction{
+		Column: parser.ColumnDefinition{Name: "id", DataType: parser.IntDataType{}},
+	})
+
+	assert.EqualError(t, err, `column name "id" already exists`)
+}
+
+func TestTable_AlterColumns_AddColumn_SecondPrimaryKeyRejected(t *testing.T) {
+	table, err := NewTable("users", []parser.ColumnDefinition{
+		{Name: "id", DataType: parser.IntDataType{}, Constraints: []parser.Constraint{parser.PrimaryKeyConstraint{}}},
+	})
+	require.NoError(t, err)
+
+	err = table.AlterColumns(parser.AddColumnAction{
+		Column: parser.ColumnDefinition{
+			Name:        "email",
+			DataType:    parser.VarCharDataType{Size: 50},
+			Constraints: []parser.Constraint{parser.PrimaryKeyConstraint{}},
+		},
+	})
+
+	assert.EqualError(t, err, "table users has more than one primary key column")
+}
+
+func TestTable_AlterColumns_DropColumn(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	err := table.AlterColumns(parser.DropColumnAction{Column: "name"})
+
+	require.NoError(t, err)
+	require.Len(t, table.Columns, 1)
+	assert.Equal(t, "id", table.Columns[0].Name)
+	require.Len(t, table.Rows[0], 1)
+	assert.Equal(t, int64(1), table.Rows[0][0])
+}
+
+func TestTable_AlterColumns_DropColumn_Unknown(t *testing.T) {
+	table := usersTable(t)
+
+	err := table.AlterColumns(parser.DropColumnAction{Column: "nickname"})
+
+	assert.EqualError(t, err, `unknown column "nickname"`)
+}
+
+func TestTable_AlterColumns_DropColumn_LastColumnRejected(t *testing.T) {
+	table, err := NewTable("users", []parser.ColumnDefinition{{Name: "id", DataType: parser.IntDataType{}}})
+	require.NoError(t, err)
+
+	err = table.AlterColumns(parser.DropColumnAction{Column: "id"})
+
+	assert.EqualError(t, err, "cannot drop the only column")
+}
+
+func TestTable_AlterColumns_RenameColumn(t *testing.T) {
+	table := usersTable(t)
+
+	err := table.AlterColumns(parser.RenameColumnAction{OldName: "name", NewName: "full_name"})
+
+	require.NoError(t, err)
+	assert.Equal(t, "full_name", table.Columns[1].Name)
+}
+
+func TestTable_AlterColumns_RenameColumn_UnknownOldName(t *testing.T) {
+	table := usersTable(t)
+
+	err := table.AlterColumns(parser.RenameColumnAction{OldName: "nickname", NewName: "n"})
+
+	assert.EqualError(t, err, `unknown column "nickname"`)
+}
+
+func TestTable_AlterColumns_RenameColumn_CollidingNewName(t *testing.T) {
+	table := usersTable(t)
+
+	err := table.AlterColumns(parser.RenameColumnAction{OldName: "name", NewName: "id"})
+
+	assert.EqualError(t, err, `column name "id" already exists`)
+}
+
+func TestTable_Rename(t *testing.T) {
+	table := usersTable(t)
+
+	table.Rename("people")
+
+	assert.Equal(t, "people", table.Name)
+}

@@ -194,6 +194,45 @@ func TestParseQuery_InsertInto(t *testing.T) {
 	assert.Empty(t, resp.GetErrorMessage())
 }
 
+func TestParseQuery_AlterTable(t *testing.T) {
+	client := newTestClient(t)
+
+	resp, err := client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: "CREATE DATABASE testdb"})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "CREATE TABLE users (id INT)",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "ALTER TABLE users ADD COLUMN name VARCHAR(50)",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+	assert.Empty(t, resp.GetErrorMessage())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "ALTER TABLE users RENAME TO people",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+	assert.Empty(t, resp.GetErrorMessage())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "INSERT INTO people (id, name) VALUES (1, 'bob')",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+	assert.Empty(t, resp.GetErrorMessage())
+}
+
 func rowStrings(rows []*sqlpb.Row) [][]string {
 	out := make([][]string, len(rows))
 	for i, row := range rows {

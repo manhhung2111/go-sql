@@ -1,5 +1,3 @@
-github.com/deckarep/golang-set/v3 v3.0.0 h1:Jn/HhA4IIh0odCMtBuiW2Gith2AlgO4+J/x7YgpGywQ=
-github.com/deckarep/golang-set/v3 v3.0.0/go.mod h1:n8bXs6b+vTxST3g+6yxlve6cVvnHr+kmWzQ/K6FXdks=
 github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=
 github.com/golang/protobuf v1.5.4/go.mod h1:lnTiLA8Wa4RWRcIUkrtSVa5nRhsEGBg48fD6rSs7xps=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=

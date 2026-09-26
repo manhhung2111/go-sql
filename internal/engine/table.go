@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"manhhung2111/go-sql/internal/parser"
 	"sync"
-
-	mapset "github.com/deckarep/golang-set/v3"
 )
 
 type Table interface {
 	InsertValues(columns []string, values [][]parser.Token) error
+	AlterColumns(action parser.AlterAction) error
+	Rename(name string)
 }
 
 type SqlTable struct {
@@ -25,34 +25,46 @@ type SqlTable struct {
 //   - Columns do not specify with contraint NOT NULL will default be NULLABLE
 //   - A table can not have duplicated columns
 func NewTable(name string, columns []parser.ColumnDefinition) (*SqlTable, error) {
-	primaryKeyColumns := 0
-	columnNameSet := mapset.NewSet[string]()
-
+	validated := make([]parser.ColumnDefinition, 0, len(columns))
 	for _, column := range columns {
-		if column.IsPrimaryKey() {
-			primaryKeyColumns++
+		if err := validateNewColumn(name, validated, column); err != nil {
+			return nil, err
 		}
-
-		if primaryKeyColumns > 1 {
-			return nil, fmt.Errorf("table %s has more than one primary key column", name)
-		}
-
-		// Validate DEFAULT against its own column's type now, so a broken
-		// DEFAULT fails at CREATE TABLE time rather than deferring to
-		// whoever triggers the first INSERT.
-		if def, ok := column.DefaultValue(); ok {
-			if _, err := coerceValue(column.DataType, def); err != nil {
-				return nil, fmt.Errorf("column %q: invalid default value: %v", column.Name, err)
-			}
-		}
-
-		if columnNameSet.Contains(column.Name) {
-			return nil, fmt.Errorf("column name %q already exists", column.Name)
-		}
-		columnNameSet.Add(column.Name)
+		validated = append(validated, column)
 	}
 
 	return &SqlTable{Name: name, Columns: columns, Rows: make([][]any, 0)}, nil
+}
+
+// validateNewColumn checks column against a table's existing columns for
+// the invariants a table's column set must maintain: no duplicate name,
+// at most one PRIMARY KEY, and a DEFAULT (if any) that coerces against
+// its own type — validated eagerly so a broken DEFAULT fails here rather
+// than deferring to whoever triggers the first INSERT. Shared by NewTable
+// (existing grows as it validates each column) and ADD COLUMN (existing
+// is the table's current columns).
+func validateNewColumn(tableName string, existing []parser.ColumnDefinition, column parser.ColumnDefinition) error {
+	for _, e := range existing {
+		if e.Name == column.Name {
+			return fmt.Errorf("column name %q already exists", column.Name)
+		}
+	}
+
+	if column.IsPrimaryKey() {
+		for _, e := range existing {
+			if e.IsPrimaryKey() {
+				return fmt.Errorf("table %s has more than one primary key column", tableName)
+			}
+		}
+	}
+
+	if def, ok := column.DefaultValue(); ok {
+		if _, err := coerceValue(column.DataType, def); err != nil {
+			return fmt.Errorf("column %q: invalid default value: %v", column.Name, err)
+		}
+	}
+
+	return nil
 }
 
 // InsertValues appends rows to the table, coercing each value against its
@@ -176,4 +188,124 @@ func (t *SqlTable) InsertValues(columns []string, values [][]parser.Token) error
 
 	t.Rows = append(t.Rows, newRows...)
 	return nil
+}
+
+// AlterColumns applies an ADD/DROP/RENAME COLUMN action. RENAME TO is
+// handled at the Database level instead, since it changes the map key
+// SqlDatabase.Table is keyed by — it never reaches here.
+func (t *SqlTable) AlterColumns(action parser.AlterAction) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	switch a := action.(type) {
+	case parser.AddColumnAction:
+		return t.addColumn(a.Column)
+	case parser.DropColumnAction:
+		return t.dropColumn(a.Column)
+	case parser.RenameColumnAction:
+		return t.renameColumn(a.OldName, a.NewName)
+	default:
+		return fmt.Errorf("unsupported alter action, got %T", action)
+	}
+}
+
+// addColumn appends column to the schema and backfills every existing
+// row with its value. Reuses the exact same coercion/uniqueness rules
+// InsertValues already enforces: a NOT NULL column with no default, or a
+// PRIMARY KEY/UNIQUE column with a default backfilled onto 2+ rows,
+// fails via the same checks INSERT uses — no new special-casing needed.
+func (t *SqlTable) addColumn(column parser.ColumnDefinition) error {
+	if err := validateNewColumn(t.Name, t.Columns, column); err != nil {
+		return err
+	}
+
+	var filler any
+	if def, ok := column.DefaultValue(); ok {
+		coerced, err := coerceValue(column.DataType, def)
+		if err != nil {
+			return fmt.Errorf("column %q: %v", column.Name, err)
+		}
+		filler = coerced
+	} else if column.RequiresValue() {
+		return fmt.Errorf("field %q doesn't have a default value", column.Name)
+	}
+
+	checkUnique := column.IsPrimaryKey() || column.IsUnique()
+	seen := make(map[any]bool, len(t.Rows))
+
+	newRows := make([][]any, len(t.Rows))
+	for i, row := range t.Rows {
+		if checkUnique && filler != nil {
+			if seen[filler] {
+				return fmt.Errorf("duplicate entry %v for column %q", filler, column.Name)
+			}
+			seen[filler] = true
+		}
+		newRows[i] = append(append([]any{}, row...), filler)
+	}
+
+	t.Columns = append(t.Columns, column)
+	t.Rows = newRows
+	return nil
+}
+
+// dropColumn removes column at its schema index from both Columns and
+// every row in Rows — the two must stay aligned, or every subsequent
+// read of a row would be reading the wrong column's value.
+func (t *SqlTable) dropColumn(name string) error {
+	idx := -1
+	for i, col := range t.Columns {
+		if col.Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("unknown column %q", name)
+	}
+	if len(t.Columns) == 1 {
+		return fmt.Errorf("cannot drop the only column")
+	}
+
+	newColumns := append(append([]parser.ColumnDefinition{}, t.Columns[:idx]...), t.Columns[idx+1:]...)
+	newRows := make([][]any, len(t.Rows))
+	for i, row := range t.Rows {
+		newRows[i] = append(append([]any{}, row[:idx]...), row[idx+1:]...)
+	}
+
+	t.Columns = newColumns
+	t.Rows = newRows
+	return nil
+}
+
+// renameColumn doesn't touch Rows — rows are positional, not keyed by
+// name, so a rename is purely a schema-metadata change.
+func (t *SqlTable) renameColumn(oldName, newName string) error {
+	idx := -1
+	for i, col := range t.Columns {
+		if col.Name == oldName {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("unknown column %q", oldName)
+	}
+
+	for _, col := range t.Columns {
+		if col.Name == newName {
+			return fmt.Errorf("column name %q already exists", newName)
+		}
+	}
+
+	t.Columns[idx].Name = newName
+	return nil
+}
+
+// Rename sets the table's own name; called by Database.RenameTable to
+// keep it in sync after re-keying the owning database's table map.
+func (t *SqlTable) Rename(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.Name = name
 }

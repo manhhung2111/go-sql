@@ -181,3 +181,111 @@ func TestEngine_InsertInto_TableDoesNotExist(t *testing.T) {
 
 	assert.EqualError(t, err, `table "users" does not exist`)
 }
+
+func newTestTable(t *testing.T, e Engine) {
+	t.Helper()
+	columns := []parser.ColumnDefinition{{Name: "id", DataType: parser.IntDataType{}}}
+	_, err := e.Execute(parser.CreateTableStatement{Table: "users", Columns: columns}, testDatabase)
+	require.NoError(t, err)
+}
+
+func TestEngine_AlterTable_AddColumn(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+	newTestTable(t, e)
+
+	resp, err := e.Execute(parser.AlterTableStatement{
+		Table:  "users",
+		Action: parser.AddColumnAction{Column: parser.ColumnDefinition{Name: "age", DataType: parser.IntDataType{}}},
+	}, testDatabase)
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{}, resp)
+}
+
+func TestEngine_AlterTable_DropColumn(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+	_, err := e.Execute(parser.CreateTableStatement{Table: "users", Columns: []parser.ColumnDefinition{
+		{Name: "id", DataType: parser.IntDataType{}},
+		{Name: "age", DataType: parser.IntDataType{}},
+	}}, testDatabase)
+	require.NoError(t, err)
+
+	resp, err := e.Execute(parser.AlterTableStatement{
+		Table:  "users",
+		Action: parser.DropColumnAction{Column: "age"},
+	}, testDatabase)
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{}, resp)
+}
+
+func TestEngine_AlterTable_RenameColumn(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+	newTestTable(t, e)
+
+	resp, err := e.Execute(parser.AlterTableStatement{
+		Table:  "users",
+		Action: parser.RenameColumnAction{OldName: "id", NewName: "user_id"},
+	}, testDatabase)
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{}, resp)
+}
+
+func TestEngine_AlterTable_RenameTable(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+	newTestTable(t, e)
+
+	resp, err := e.Execute(parser.AlterTableStatement{
+		Table:  "users",
+		Action: parser.RenameTableAction{NewName: "people"},
+	}, testDatabase)
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{}, resp)
+
+	db, err := catalog.GetDatabase(testDatabase)
+	require.NoError(t, err)
+	_, exists := db.GetTable("people")
+	assert.True(t, exists)
+}
+
+func TestEngine_AlterTable_NoDatabaseSelected(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.AlterTableStatement{Table: "users", Action: parser.RenameTableAction{NewName: "people"}}, "")
+
+	assert.EqualError(t, err, "database name is required")
+}
+
+func TestEngine_AlterTable_DatabaseDoesNotExist(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.AlterTableStatement{
+		Table:  "users",
+		Action: parser.RenameTableAction{NewName: "people"},
+	}, testDatabase)
+
+	assert.EqualError(t, err, `database "test" does not exist`)
+}
+
+func TestEngine_AlterTable_TableDoesNotExist(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+
+	_, err := e.Execute(parser.AlterTableStatement{
+		Table:  "users",
+		Action: parser.DropColumnAction{Column: "id"},
+	}, testDatabase)
+
+	assert.EqualError(t, err, `table "users" does not exist`)
+}

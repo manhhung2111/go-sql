@@ -64,6 +64,41 @@ func TestDatabase_GetTable_NotFound(t *testing.T) {
 	assert.False(t, exists)
 }
 
+func TestDatabase_RenameTable(t *testing.T) {
+	db := NewDatabase("testdb")
+	columns := []parser.ColumnDefinition{{Name: "id", DataType: parser.IntDataType{}}}
+	require.NoError(t, db.CreateTable("users", columns, false))
+
+	err := db.RenameTable("users", "people")
+
+	require.NoError(t, err)
+	_, exists := db.GetTable("users")
+	assert.False(t, exists, "the old name must no longer resolve")
+
+	table, exists := db.GetTable("people")
+	require.True(t, exists)
+	assert.Equal(t, columns, table.(*SqlTable).Columns)
+	assert.Equal(t, "people", table.(*SqlTable).Name)
+}
+
+func TestDatabase_RenameTable_OldNameMissing(t *testing.T) {
+	db := NewDatabase("testdb")
+
+	err := db.RenameTable("users", "people")
+
+	assert.EqualError(t, err, `table "users" does not exist`)
+}
+
+func TestDatabase_RenameTable_NewNameCollides(t *testing.T) {
+	db := NewDatabase("testdb")
+	require.NoError(t, db.CreateTable("users", nil, false))
+	require.NoError(t, db.CreateTable("people", nil, false))
+
+	err := db.RenameTable("users", "people")
+
+	assert.EqualError(t, err, `table "people" already exists`)
+}
+
 func TestDatabase_ConcurrentCreateTable(t *testing.T) {
 	db := NewDatabase("testdb")
 	const n = 50

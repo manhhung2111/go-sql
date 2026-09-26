@@ -9,6 +9,7 @@ import (
 type Database interface {
 	GetTable(name string) (Table, bool)
 	CreateTable(name string, columns []parser.ColumnDefinition, ifNotExists bool) error
+	RenameTable(oldName, newName string) error
 }
 
 type SqlDatabase struct {
@@ -49,5 +50,23 @@ func (d *SqlDatabase) CreateTable(name string, columns []parser.ColumnDefinition
 	}
 
 	d.Table[name] = table
+	return nil
+}
+
+func (d *SqlDatabase) RenameTable(oldName, newName string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	table, exists := d.Table[oldName]
+	if !exists {
+		return fmt.Errorf("table %q does not exist", oldName)
+	}
+	if _, exists := d.Table[newName]; exists {
+		return fmt.Errorf("table %q already exists", newName)
+	}
+
+	delete(d.Table, oldName)
+	d.Table[newName] = table
+	table.Rename(newName)
 	return nil
 }
