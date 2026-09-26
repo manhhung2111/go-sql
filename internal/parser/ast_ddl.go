@@ -64,6 +64,11 @@ func (c ColumnDefinition) IsPrimaryKey() bool { return hasConstraint[PrimaryKeyC
 func (c ColumnDefinition) IsNotNull() bool    { return hasConstraint[NotNullConstraint](c) }
 func (c ColumnDefinition) IsUnique() bool     { return hasConstraint[UniqueConstraint](c) }
 
+// RequiresValue reports whether a column must never be NULL — true for an
+// explicit NOT NULL constraint, and also for PRIMARY KEY, which implies
+// NOT NULL even without stating it separately.
+func (c ColumnDefinition) RequiresValue() bool { return c.IsNotNull() || c.IsPrimaryKey() }
+
 func (c ColumnDefinition) DefaultValue() (Token, bool) {
 	for _, constraint := range c.Constraints {
 		if d, ok := constraint.(DefaultConstraint); ok {

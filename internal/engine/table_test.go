@@ -34,8 +34,8 @@ func TestTable_InsertValues_ExplicitOutOfOrderColumns(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, table.Rows, 1)
-	assert.Equal(t, numTok("1"), table.Rows[0][0])   // id, schema position 0
-	assert.Equal(t, strTok("bob"), table.Rows[0][1]) // name, schema position 1
+	assert.Equal(t, int64(1), table.Rows[0][0]) // id, schema position 0
+	assert.Equal(t, "bob", table.Rows[0][1])    // name, schema position 1
 }
 
 func TestTable_InsertValues_NoColumnList_FullRow(t *testing.T) {
@@ -47,7 +47,7 @@ func TestTable_InsertValues_NoColumnList_FullRow(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, table.Rows, 1)
-	assert.Equal(t, []any{numTok("1"), strTok("bob")}, table.Rows[0])
+	assert.Equal(t, []any{int64(1), "bob"}, table.Rows[0])
 }
 
 func TestTable_InsertValues_NoColumnList_ArityMismatch(t *testing.T) {
@@ -101,7 +101,7 @@ func TestTable_InsertValues_OmittedColumnWithDefault(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, table.Rows, 1)
-	assert.Equal(t, numTok("18"), table.Rows[0][2])
+	assert.Equal(t, int64(18), table.Rows[0][2])
 }
 
 func TestTable_InsertValues_OmittedNotNullColumnWithoutDefault(t *testing.T) {
@@ -160,4 +160,89 @@ func TestTable_InsertValues_Concurrent(t *testing.T) {
 	wg.Wait()
 
 	assert.Len(t, table.Rows, n)
+}
+
+func TestNewTable_RejectsInvalidDefault(t *testing.T) {
+	_, err := NewTable("users", []parser.ColumnDefinition{
+		{
+			Name:        "age",
+			DataType:    parser.IntDataType{},
+			Constraints: []parser.Constraint{parser.DefaultConstraint{DefaultValue: strTok("not-a-number")}},
+		},
+	})
+
+	assert.EqualError(t, err, `column "age": invalid default value: expected a numeric value, got not-a-number`)
+}
+
+func TestTable_InsertValues_WrongLiteralKind(t *testing.T) {
+	table := usersTable(t)
+
+	err := table.InsertValues([]string{"id", "name"}, [][]parser.Token{
+		tokRow(strTok("one"), strTok("bob")),
+	})
+
+	assert.EqualError(t, err, `column "id": expected a numeric value, got one`)
+}
+
+func TestTable_InsertValues_PrimaryKeyImpliesNotNull(t *testing.T) {
+	table, err := NewTable("users", []parser.ColumnDefinition{
+		{Name: "id", DataType: parser.IntDataType{}, Constraints: []parser.Constraint{parser.PrimaryKeyConstraint{}}},
+		{Name: "name", DataType: parser.VarCharDataType{Size: 50}},
+	})
+	require.NoError(t, err)
+
+	err = table.InsertValues([]string{"name"}, [][]parser.Token{tokRow(strTok("bob"))})
+
+	assert.EqualError(t, err, `field "id" doesn't have a default value`)
+}
+
+func uniqueUsersTable(t *testing.T) *SqlTable {
+	t.Helper()
+	table, err := NewTable("users", []parser.ColumnDefinition{
+		{Name: "id", DataType: parser.IntDataType{}, Constraints: []parser.Constraint{parser.PrimaryKeyConstraint{}}},
+		{Name: "email", DataType: parser.VarCharDataType{Size: 100}, Constraints: []parser.Constraint{parser.UniqueConstraint{}}},
+	})
+	require.NoError(t, err)
+	return table
+}
+
+func TestTable_InsertValues_DuplicateAgainstExistingRow(t *testing.T) {
+	table := uniqueUsersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("a@x.com"))}))
+
+	err := table.InsertValues(nil, [][]parser.Token{tokRow(numTok("2"), strTok("a@x.com"))})
+
+	assert.EqualError(t, err, `duplicate entry a@x.com for column "email"`)
+}
+
+func TestTable_InsertValues_DuplicateWithinSameBatch(t *testing.T) {
+	table := uniqueUsersTable(t)
+
+	err := table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("a@x.com")),
+		tokRow(numTok("2"), strTok("a@x.com")),
+	})
+
+	assert.EqualError(t, err, `duplicate entry a@x.com for column "email"`)
+	assert.Empty(t, table.Rows, "a rejected batch must not leave earlier rows committed")
+}
+
+func TestTable_InsertValues_DuplicatePrimaryKey(t *testing.T) {
+	table := uniqueUsersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("a@x.com"))}))
+
+	err := table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("b@x.com"))})
+
+	assert.EqualError(t, err, `duplicate entry 1 for column "id"`)
+}
+
+func TestTable_InsertValues_NullExemptFromUniqueness(t *testing.T) {
+	table := uniqueUsersTable(t)
+	require.NoError(t, table.InsertValues([]string{"id"}, [][]parser.Token{tokRow(numTok("1"))}))
+
+	err := table.InsertValues([]string{"id"}, [][]parser.Token{tokRow(numTok("2"))})
+
+	require.NoError(t, err, "two rows both omitting the nullable UNIQUE column must not conflict")
+	assert.Nil(t, table.Rows[0][1])
+	assert.Nil(t, table.Rows[1][1])
 }
