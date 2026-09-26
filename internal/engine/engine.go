@@ -105,6 +105,22 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 		}
 
 		return Response{}, nil
+
+	case parser.DropTableStatement:
+		if dbName == "" {
+			return Response{}, fmt.Errorf("database name is required")
+		}
+
+		database, err := e.Catalog.GetDatabase(dbName)
+		if err != nil {
+			return Response{}, err
+		}
+
+		if err := database.DropTable(stmt.Table, stmt.IfExists); err != nil {
+			return Response{}, err
+		}
+
+		return Response{}, nil
 	default:
 		return Response{}, fmt.Errorf("statement not supported, got %T", stmt)
 	}

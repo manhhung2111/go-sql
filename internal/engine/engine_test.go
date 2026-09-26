@@ -289,3 +289,57 @@ func TestEngine_AlterTable_TableDoesNotExist(t *testing.T) {
 
 	assert.EqualError(t, err, `table "users" does not exist`)
 }
+
+func TestEngine_DropTable(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+	newTestTable(t, e)
+
+	resp, err := e.Execute(parser.DropTableStatement{Table: "users"}, testDatabase)
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{}, resp)
+
+	db, err := catalog.GetDatabase(testDatabase)
+	require.NoError(t, err)
+	_, exists := db.GetTable("users")
+	assert.False(t, exists)
+}
+
+func TestEngine_DropTable_NoDatabaseSelected(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.DropTableStatement{Table: "users"}, "")
+
+	assert.EqualError(t, err, "database name is required")
+}
+
+func TestEngine_DropTable_DatabaseDoesNotExist(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.DropTableStatement{Table: "users"}, testDatabase)
+
+	assert.EqualError(t, err, `database "test" does not exist`)
+}
+
+func TestEngine_DropTable_TableDoesNotExist(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+
+	_, err := e.Execute(parser.DropTableStatement{Table: "users"}, testDatabase)
+
+	assert.EqualError(t, err, `table "users" does not exist`)
+}
+
+func TestEngine_DropTable_IfExists(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+
+	resp, err := e.Execute(parser.DropTableStatement{Table: "users", IfExists: true}, testDatabase)
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{}, resp)
+}

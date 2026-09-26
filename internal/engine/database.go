@@ -10,6 +10,7 @@ type Database interface {
 	GetTable(name string) (Table, bool)
 	CreateTable(name string, columns []parser.ColumnDefinition, ifNotExists bool) error
 	RenameTable(oldName, newName string) error
+	DropTable(name string, ifExists bool) error
 }
 
 type SqlDatabase struct {
@@ -68,5 +69,20 @@ func (d *SqlDatabase) RenameTable(oldName, newName string) error {
 	delete(d.Table, oldName)
 	d.Table[newName] = table
 	table.Rename(newName)
+	return nil
+}
+
+func (d *SqlDatabase) DropTable(name string, ifExists bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, exists := d.Table[name]; !exists {
+		if ifExists {
+			return nil
+		}
+		return fmt.Errorf("table %q does not exist", name)
+	}
+
+	delete(d.Table, name)
 	return nil
 }

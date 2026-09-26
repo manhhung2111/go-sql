@@ -99,6 +99,33 @@ func TestDatabase_RenameTable_NewNameCollides(t *testing.T) {
 	assert.EqualError(t, err, `table "people" already exists`)
 }
 
+func TestDatabase_DropTable(t *testing.T) {
+	db := NewDatabase("testdb")
+	require.NoError(t, db.CreateTable("users", nil, false))
+
+	err := db.DropTable("users", false)
+
+	require.NoError(t, err)
+	_, exists := db.GetTable("users")
+	assert.False(t, exists)
+}
+
+func TestDatabase_DropTable_DoesNotExist(t *testing.T) {
+	db := NewDatabase("testdb")
+
+	err := db.DropTable("users", false)
+
+	assert.EqualError(t, err, `table "users" does not exist`)
+}
+
+func TestDatabase_DropTable_IfExists(t *testing.T) {
+	db := NewDatabase("testdb")
+
+	err := db.DropTable("users", true)
+
+	assert.NoError(t, err)
+}
+
 func TestDatabase_ConcurrentCreateTable(t *testing.T) {
 	db := NewDatabase("testdb")
 	const n = 50
