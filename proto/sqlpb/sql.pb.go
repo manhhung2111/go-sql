@@ -73,6 +73,7 @@ func (StatusCode) EnumDescriptor() ([]byte, []int) {
 type QueryRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Sql           string                 `protobuf:"bytes,1,opt,name=sql,proto3" json:"sql,omitempty"`
+	Database      string                 `protobuf:"bytes,2,opt,name=database,proto3" json:"database,omitempty"` // target database; required for table-level statements
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -110,6 +111,13 @@ func (*QueryRequest) Descriptor() ([]byte, []int) {
 func (x *QueryRequest) GetSql() string {
 	if x != nil {
 		return x.Sql
+	}
+	return ""
+}
+
+func (x *QueryRequest) GetDatabase() string {
+	if x != nil {
+		return x.Database
 	}
 	return ""
 }
@@ -230,9 +238,10 @@ var File_sql_proto protoreflect.FileDescriptor
 
 const file_sql_proto_rawDesc = "" +
 	"\n" +
-	"\tsql.proto\x12\x05sqlpb\" \n" +
+	"\tsql.proto\x12\x05sqlpb\"<\n" +
 	"\fQueryRequest\x12\x10\n" +
-	"\x03sql\x18\x01 \x01(\tR\x03sql\"\x1d\n" +
+	"\x03sql\x18\x01 \x01(\tR\x03sql\x12\x1a\n" +
+	"\bdatabase\x18\x02 \x01(\tR\bdatabase\"\x1d\n" +
 	"\x03Row\x12\x16\n" +
 	"\x06values\x18\x01 \x03(\tR\x06values\"\x95\x01\n" +
 	"\rQueryResponse\x12%\n" +

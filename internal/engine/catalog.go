@@ -7,23 +7,20 @@ import (
 )
 
 type Catalog interface {
+	GetDatabase(name string) (Database, error)
 	ListDatabases() []string
 	CreateDatabase(name string) error
 	DropDatabase(name string) error
 }
 
-type Database struct {
-	Name string
-}
-
 type SqlCatalog struct {
 	mu        sync.RWMutex
-	Databases map[string]*Database
+	Databases map[string]Database
 }
 
 func NewCatalog() Catalog {
 	return &SqlCatalog{
-		Databases: make(map[string]*Database),
+		Databases: make(map[string]Database),
 	}
 }
 
@@ -50,7 +47,7 @@ func (c *SqlCatalog) CreateDatabase(name string) error {
 		return fmt.Errorf("database %q already exists", name)
 	}
 
-	c.Databases[name] = &Database{Name: name}
+	c.Databases[name] = NewDatabase(name)
 	return nil
 }
 
@@ -64,4 +61,15 @@ func (c *SqlCatalog) DropDatabase(name string) error {
 
 	delete(c.Databases, name)
 	return nil
+}
+
+func (c *SqlCatalog) GetDatabase(name string) (Database, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	db, exists := c.Databases[name]
+	if !exists {
+		return nil, fmt.Errorf("database %q does not exist", name)
+	}
+	return db, nil
 }

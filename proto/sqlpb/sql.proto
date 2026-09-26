@@ -6,6 +6,7 @@ option go_package = "manhhung2111/go-sql/proto/sqlpb";
 
 message QueryRequest {
   string sql = 1;
+  string database = 2; // target database; required for table-level statements
 }
 
 enum StatusCode {

@@ -132,6 +132,45 @@ func TestParseQuery_ExecutionErrors(t *testing.T) {
 	}
 }
 
+func TestParseQuery_CreateTable(t *testing.T) {
+	client := newTestClient(t)
+
+	resp, err := client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: "CREATE DATABASE testdb"})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "CREATE TABLE users (id INT)",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+	assert.Empty(t, resp.GetErrorMessage())
+}
+
+func TestParseQuery_CreateTable_NoDatabaseSelected(t *testing.T) {
+	client := newTestClient(t)
+
+	resp, err := client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: "CREATE TABLE users (id INT)"})
+
+	require.NoError(t, err)
+	assert.Equal(t, sqlpb.StatusCode_EXECUTION_ERROR, resp.GetCode())
+	assert.Equal(t, "database name is required", resp.GetErrorMessage())
+}
+
+func TestParseQuery_CreateTable_DatabaseDoesNotExist(t *testing.T) {
+	client := newTestClient(t)
+
+	resp, err := client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "CREATE TABLE users (id INT)",
+		Database: "testdb",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, sqlpb.StatusCode_EXECUTION_ERROR, resp.GetCode())
+	assert.Equal(t, `database "testdb" does not exist`, resp.GetErrorMessage())
+}
+
 func rowStrings(rows []*sqlpb.Row) [][]string {
 	out := make([][]string, len(rows))
 	for i, row := range rows {

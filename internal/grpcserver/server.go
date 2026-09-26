@@ -26,7 +26,7 @@ func (s *Server) ParseQuery(_ context.Context, req *sqlpb.QueryRequest) (*sqlpb.
 		return &sqlpb.QueryResponse{Code: sqlpb.StatusCode_PARSE_ERROR, ErrorMessage: err.Error()}, nil
 	}
 
-	response, err := s.engine.Execute(statement)
+	response, err := s.engine.Execute(statement, req.GetDatabase())
 	if err != nil {
 		return &sqlpb.QueryResponse{Code: sqlpb.StatusCode_EXECUTION_ERROR, ErrorMessage: err.Error()}, nil
 	}
