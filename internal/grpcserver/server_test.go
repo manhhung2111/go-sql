@@ -171,6 +171,29 @@ func TestParseQuery_CreateTable_DatabaseDoesNotExist(t *testing.T) {
 	assert.Equal(t, `database "testdb" does not exist`, resp.GetErrorMessage())
 }
 
+func TestParseQuery_InsertInto(t *testing.T) {
+	client := newTestClient(t)
+
+	resp, err := client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: "CREATE DATABASE testdb"})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "CREATE TABLE users (id INT, name VARCHAR(50))",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "INSERT INTO users (id, name) VALUES (1, 'bob')",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+	assert.Empty(t, resp.GetErrorMessage())
+}
+
 func rowStrings(rows []*sqlpb.Row) [][]string {
 	out := make([][]string, len(rows))
 	for i, row := range rows {

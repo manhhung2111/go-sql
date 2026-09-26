@@ -134,3 +134,50 @@ func TestEngine_CreateTable_IfNotExists(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, Response{}, resp)
 }
+
+func TestEngine_InsertInto(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+
+	columns := []parser.ColumnDefinition{
+		{Name: "id", DataType: parser.IntDataType{}},
+		{Name: "name", DataType: parser.VarCharDataType{Size: 50}},
+	}
+	_, err := e.Execute(parser.CreateTableStatement{Table: "users", Columns: columns}, testDatabase)
+	require.NoError(t, err)
+
+	resp, err := e.Execute(parser.InsertIntoStatement{
+		Table:  "users",
+		Values: [][]parser.Token{{{Type: parser.NUMBER, Value: "1"}, {Type: parser.STRING, Value: "bob"}}},
+	}, testDatabase)
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{}, resp)
+}
+
+func TestEngine_InsertInto_NoDatabaseSelected(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.InsertIntoStatement{Table: "users"}, "")
+
+	assert.EqualError(t, err, "database name is required")
+}
+
+func TestEngine_InsertInto_DatabaseDoesNotExist(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.InsertIntoStatement{Table: "users"}, testDatabase)
+
+	assert.EqualError(t, err, `database "test" does not exist`)
+}
+
+func TestEngine_InsertInto_TableDoesNotExist(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+
+	_, err := e.Execute(parser.InsertIntoStatement{Table: "users"}, testDatabase)
+
+	assert.EqualError(t, err, `table "users" does not exist`)
+}

@@ -43,6 +43,11 @@ func (d *SqlDatabase) CreateTable(name string, columns []parser.ColumnDefinition
 		return nil
 	}
 
-	d.Table[name] = NewTable(name, columns)
+	table, err := NewTable(name, columns)
+	if err != nil {
+		return err
+	}
+
+	d.Table[name] = table
 	return nil
 }

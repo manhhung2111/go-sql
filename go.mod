@@ -3,6 +3,7 @@ module manhhung2111/go-sql
 go 1.26.4
 
 require (
+	github.com/deckarep/golang-set/v3 v3.0.0
 	github.com/google/wire v0.7.0
 	github.com/stretchr/testify v1.12.1
 	go.yaml.in/yaml/v3 v3.0.5

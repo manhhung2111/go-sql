@@ -50,3 +50,25 @@ type RenameColumnAction struct {
 type RenameTableAction struct {
 	NewName string
 }
+
+func hasConstraint[T Constraint](c ColumnDefinition) bool {
+	for _, constraint := range c.Constraints {
+		if _, ok := constraint.(T); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (c ColumnDefinition) IsPrimaryKey() bool { return hasConstraint[PrimaryKeyConstraint](c) }
+func (c ColumnDefinition) IsNotNull() bool    { return hasConstraint[NotNullConstraint](c) }
+func (c ColumnDefinition) IsUnique() bool     { return hasConstraint[UniqueConstraint](c) }
+
+func (c ColumnDefinition) DefaultValue() (Token, bool) {
+	for _, constraint := range c.Constraints {
+		if d, ok := constraint.(DefaultConstraint); ok {
+			return d.DefaultValue, true
+		}
+	}
+	return Token{}, false
+}

@@ -56,6 +56,27 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 		}
 
 		return Response{}, nil
+
+	case parser.InsertIntoStatement:
+		if dbName == "" {
+			return Response{}, fmt.Errorf("database name is required")
+		}
+
+		database, err := e.Catalog.GetDatabase(dbName)
+		if err != nil {
+			return Response{}, err
+		}
+
+		table, exists := database.GetTable(stmt.Table)
+		if !exists {
+			return Response{}, fmt.Errorf("table %q does not exist", stmt.Table)
+		}
+
+		if err := table.InsertValues(stmt.Columns, stmt.Values); err != nil {
+			return Response{}, err
+		}
+
+		return Response{}, nil
 	default:
 		return Response{}, fmt.Errorf("statement not supported, got %T", stmt)
 	}
