@@ -9,6 +9,7 @@ package wiring
 import (
 	"github.com/google/wire"
 	"manhhung2111/go-sql/internal/config"
+	"manhhung2111/go-sql/internal/engine"
 	"manhhung2111/go-sql/internal/grpcserver"
 	"manhhung2111/go-sql/internal/parser"
 )
@@ -16,10 +17,14 @@ import (
 // Injectors from wire.go:
 
 func InitializeServer(cfg *config.Config) (*grpcserver.Server, error) {
-	server := grpcserver.NewServer(cfg)
+	lexer := parser.NewLexer()
+	parserParser := parser.NewParser(lexer)
+	catalog := engine.NewCatalog()
+	engineEngine := engine.NewEngine(catalog)
+	server := grpcserver.NewServer(cfg, parserParser, engineEngine)
 	return server, nil
 }
 
 // wire.go:
 
-var WireSet = wire.NewSet(parser.WireSet, grpcserver.WireSet)
+var WireSet = wire.NewSet(parser.WireSet, grpcserver.WireSet, engine.WireSet)

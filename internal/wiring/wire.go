@@ -8,6 +8,7 @@ package wiring
 
 import (
 	"manhhung2111/go-sql/internal/config"
+	"manhhung2111/go-sql/internal/engine"
 	"manhhung2111/go-sql/internal/grpcserver"
 	"manhhung2111/go-sql/internal/parser"
 
@@ -17,6 +18,7 @@ import (
 var WireSet = wire.NewSet(
 	parser.WireSet,
 	grpcserver.WireSet,
+	engine.WireSet,
 )
 
 func InitializeServer(cfg *config.Config) (*grpcserver.Server, error) {

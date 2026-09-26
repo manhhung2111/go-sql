@@ -3,21 +3,26 @@ package parser
 import "fmt"
 
 type Parser interface {
-	Parse() (SqlStatement, error)
+	Parse(sqlStatement string) (SqlStatement, error)
 }
 
 type SqlStatement interface{}
 
 type sqlParser struct {
+	lexer  Lexer
 	tokens []Token
 	pos    int
 }
 
-func NewParser(tokens []Token) Parser {
-	return &sqlParser{tokens: tokens, pos: 0}
+func NewParser(lexer Lexer) Parser {
+	return &sqlParser{lexer: lexer, pos: 0}
 }
 
-func (s *sqlParser) Parse() (SqlStatement, error) {
+func (s *sqlParser) Parse(sqlStatement string) (SqlStatement, error) {
+	// Parse is re-runnable
+	s.tokens = s.lexer.Lexing(sqlStatement)
+	s.pos = 0
+
 	firstToken := s.advance()
 
 	var (

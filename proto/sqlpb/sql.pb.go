@@ -24,8 +24,9 @@ const (
 type StatusCode int32
 
 const (
-	StatusCode_OK          StatusCode = 0
-	StatusCode_PARSE_ERROR StatusCode = 1
+	StatusCode_OK              StatusCode = 0
+	StatusCode_PARSE_ERROR     StatusCode = 1
+	StatusCode_EXECUTION_ERROR StatusCode = 2
 )
 
 // Enum value maps for StatusCode.
@@ -33,10 +34,12 @@ var (
 	StatusCode_name = map[int32]string{
 		0: "OK",
 		1: "PARSE_ERROR",
+		2: "EXECUTION_ERROR",
 	}
 	StatusCode_value = map[string]int32{
-		"OK":          0,
-		"PARSE_ERROR": 1,
+		"OK":              0,
+		"PARSE_ERROR":     1,
+		"EXECUTION_ERROR": 2,
 	}
 )
 
@@ -111,17 +114,63 @@ func (x *QueryRequest) GetSql() string {
 	return ""
 }
 
+type Row struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Values        []string               `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Row) Reset() {
+	*x = Row{}
+	mi := &file_sql_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Row) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Row) ProtoMessage() {}
+
+func (x *Row) ProtoReflect() protoreflect.Message {
+	mi := &file_sql_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Row.ProtoReflect.Descriptor instead.
+func (*Row) Descriptor() ([]byte, []int) {
+	return file_sql_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Row) GetValues() []string {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
 type QueryResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Code          StatusCode             `protobuf:"varint,1,opt,name=code,proto3,enum=sqlpb.StatusCode" json:"code,omitempty"`
 	ErrorMessage  string                 `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"` // empty when code == OK
+	Columns       []string               `protobuf:"bytes,3,rep,name=columns,proto3" json:"columns,omitempty"`                               // empty when the statement has no tabular output
+	Rows          []*Row                 `protobuf:"bytes,4,rep,name=rows,proto3" json:"rows,omitempty"`                                     // empty when the statement has no tabular output
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QueryResponse) Reset() {
 	*x = QueryResponse{}
-	mi := &file_sql_proto_msgTypes[1]
+	mi := &file_sql_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -133,7 +182,7 @@ func (x *QueryResponse) String() string {
 func (*QueryResponse) ProtoMessage() {}
 
 func (x *QueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sql_proto_msgTypes[1]
+	mi := &file_sql_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -146,7 +195,7 @@ func (x *QueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResponse.ProtoReflect.Descriptor instead.
 func (*QueryResponse) Descriptor() ([]byte, []int) {
-	return file_sql_proto_rawDescGZIP(), []int{1}
+	return file_sql_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *QueryResponse) GetCode() StatusCode {
@@ -163,20 +212,40 @@ func (x *QueryResponse) GetErrorMessage() string {
 	return ""
 }
 
+func (x *QueryResponse) GetColumns() []string {
+	if x != nil {
+		return x.Columns
+	}
+	return nil
+}
+
+func (x *QueryResponse) GetRows() []*Row {
+	if x != nil {
+		return x.Rows
+	}
+	return nil
+}
+
 var File_sql_proto protoreflect.FileDescriptor
 
 const file_sql_proto_rawDesc = "" +
 	"\n" +
 	"\tsql.proto\x12\x05sqlpb\" \n" +
 	"\fQueryRequest\x12\x10\n" +
-	"\x03sql\x18\x01 \x01(\tR\x03sql\"[\n" +
+	"\x03sql\x18\x01 \x01(\tR\x03sql\"\x1d\n" +
+	"\x03Row\x12\x16\n" +
+	"\x06values\x18\x01 \x03(\tR\x06values\"\x95\x01\n" +
 	"\rQueryResponse\x12%\n" +
 	"\x04code\x18\x01 \x01(\x0e2\x11.sqlpb.StatusCodeR\x04code\x12#\n" +
-	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage*%\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x18\n" +
+	"\acolumns\x18\x03 \x03(\tR\acolumns\x12\x1e\n" +
+	"\x04rows\x18\x04 \x03(\v2\n" +
+	".sqlpb.RowR\x04rows*:\n" +
 	"\n" +
 	"StatusCode\x12\x06\n" +
 	"\x02OK\x10\x00\x12\x0f\n" +
-	"\vPARSE_ERROR\x10\x012K\n" +
+	"\vPARSE_ERROR\x10\x01\x12\x13\n" +
+	"\x0fEXECUTION_ERROR\x10\x022K\n" +
 	"\x10SqlParserService\x127\n" +
 	"\n" +
 	"ParseQuery\x12\x13.sqlpb.QueryRequest\x1a\x14.sqlpb.QueryResponseB!Z\x1fmanhhung2111/go-sql/proto/sqlpbb\x06proto3"
@@ -194,21 +263,23 @@ func file_sql_proto_rawDescGZIP() []byte {
 }
 
 var file_sql_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_sql_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_sql_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_sql_proto_goTypes = []any{
 	(StatusCode)(0),       // 0: sqlpb.StatusCode
 	(*QueryRequest)(nil),  // 1: sqlpb.QueryRequest
-	(*QueryResponse)(nil), // 2: sqlpb.QueryResponse
+	(*Row)(nil),           // 2: sqlpb.Row
+	(*QueryResponse)(nil), // 3: sqlpb.QueryResponse
 }
 var file_sql_proto_depIdxs = []int32{
 	0, // 0: sqlpb.QueryResponse.code:type_name -> sqlpb.StatusCode
-	1, // 1: sqlpb.SqlParserService.ParseQuery:input_type -> sqlpb.QueryRequest
-	2, // 2: sqlpb.SqlParserService.ParseQuery:output_type -> sqlpb.QueryResponse
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	2, // 1: sqlpb.QueryResponse.rows:type_name -> sqlpb.Row
+	1, // 2: sqlpb.SqlParserService.ParseQuery:input_type -> sqlpb.QueryRequest
+	3, // 3: sqlpb.SqlParserService.ParseQuery:output_type -> sqlpb.QueryResponse
+	3, // [3:4] is the sub-list for method output_type
+	2, // [2:3] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_sql_proto_init() }
@@ -222,7 +293,7 @@ func file_sql_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_sql_proto_rawDesc), len(file_sql_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   2,
+			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

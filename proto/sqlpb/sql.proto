@@ -11,11 +11,18 @@ message QueryRequest {
 enum StatusCode {
   OK = 0;
   PARSE_ERROR = 1;
+  EXECUTION_ERROR = 2;
+}
+
+message Row {
+  repeated string values = 1;
 }
 
 message QueryResponse {
   StatusCode code = 1;
   string error_message = 2; // empty when code == OK
+  repeated string columns = 3; // empty when the statement has no tabular output
+  repeated Row rows = 4;       // empty when the statement has no tabular output
 }
 
 service SqlParserService {

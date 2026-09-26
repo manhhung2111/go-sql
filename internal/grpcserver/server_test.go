@@ -12,6 +12,8 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"manhhung2111/go-sql/internal/config"
+	"manhhung2111/go-sql/internal/engine"
+	"manhhung2111/go-sql/internal/parser"
 	"manhhung2111/go-sql/proto/sqlpb"
 )
 
@@ -21,8 +23,11 @@ func newTestClient(t *testing.T) sqlpb.SqlParserServiceClient {
 	lis := bufconn.Listen(1024 * 1024)
 	t.Cleanup(func() { lis.Close() })
 
+	sqlParser := parser.NewParser(parser.NewLexer())
+	sqlEngine := engine.NewEngine(engine.NewCatalog())
+
 	grpcServer := grpc.NewServer()
-	sqlpb.RegisterSqlParserServiceServer(grpcServer, NewServer(&config.Config{}))
+	sqlpb.RegisterSqlParserServiceServer(grpcServer, NewServer(&config.Config{}, sqlParser, sqlEngine))
 	go grpcServer.Serve(lis)
 	t.Cleanup(grpcServer.Stop)
 
@@ -44,11 +49,8 @@ func TestParseQuery_ValidStatements(t *testing.T) {
 	client := newTestClient(t)
 
 	sqls := []string{
-		"SELECT * FROM users",
-		"SELECT * FROM users WHERE age > 18",
-		"INSERT INTO users (id, name) VALUES (1, 'bob')",
-		"UPDATE users SET age = 30 WHERE id = 1",
-		"DELETE FROM users WHERE id = 1",
+		"CREATE DATABASE testdb",
+		"SHOW DATABASES",
 	}
 
 	for _, sql := range sqls {
@@ -60,6 +62,82 @@ func TestParseQuery_ValidStatements(t *testing.T) {
 			assert.Empty(t, resp.GetErrorMessage())
 		})
 	}
+}
+
+func TestParseQuery_CreateThenDropDatabase(t *testing.T) {
+	client := newTestClient(t)
+
+	resp, err := client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: "CREATE DATABASE testdb"})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: "DROP DATABASE testdb"})
+	require.NoError(t, err)
+	assert.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+	assert.Empty(t, resp.GetErrorMessage())
+}
+
+func TestParseQuery_ShowDatabasesReturnsRows(t *testing.T) {
+	client := newTestClient(t)
+
+	_, err := client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: "CREATE DATABASE zebra"})
+	require.NoError(t, err)
+	_, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: "CREATE DATABASE apple"})
+	require.NoError(t, err)
+
+	resp, err := client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: "SHOW DATABASES"})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+	assert.Equal(t, []string{"Database"}, resp.GetColumns())
+	assert.Equal(t, [][]string{{"apple"}, {"zebra"}}, rowStrings(resp.GetRows()))
+}
+
+func TestParseQuery_ExecutionErrors(t *testing.T) {
+	tests := []struct {
+		name          string
+		sqls          []string
+		errorContains string
+	}{
+		{
+			name:          "create database twice",
+			sqls:          []string{"CREATE DATABASE testdb", "CREATE DATABASE testdb"},
+			errorContains: `database "testdb" already exists`,
+		},
+		{
+			name:          "drop database never created",
+			sqls:          []string{"DROP DATABASE testdb"},
+			errorContains: `database "testdb" does not exist`,
+		},
+		{
+			name:          "statement not yet supported",
+			sqls:          []string{"SELECT * FROM users"},
+			errorContains: "statement not supported, got parser.SelectStatement",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newTestClient(t)
+
+			var resp *sqlpb.QueryResponse
+			var err error
+			for _, sql := range tt.sqls {
+				resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: sql})
+				require.NoError(t, err)
+			}
+
+			assert.Equal(t, sqlpb.StatusCode_EXECUTION_ERROR, resp.GetCode())
+			assert.Equal(t, tt.errorContains, resp.GetErrorMessage())
+		})
+	}
+}
+
+func rowStrings(rows []*sqlpb.Row) [][]string {
+	out := make([][]string, len(rows))
+	for i, row := range rows {
+		out[i] = row.GetValues()
+	}
+	return out
 }
 
 func TestParseQuery_InvalidStatements(t *testing.T) {

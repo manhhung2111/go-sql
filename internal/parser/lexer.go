@@ -6,7 +6,7 @@ import (
 )
 
 type Lexer interface {
-	Lexing() []Token
+	Lexing(sqlStatement string) []Token
 }
 
 type sqlLexer struct {
@@ -14,8 +14,8 @@ type sqlLexer struct {
 	pos   int
 }
 
-func NewLexer(sqlStatement string) Lexer {
-	return &sqlLexer{runes: []rune(sqlStatement)}
+func NewLexer() Lexer {
+	return &sqlLexer{}
 }
 
 func getTokenType(value string) TokenType {
@@ -54,8 +54,9 @@ func (l *sqlLexer) skipWhitespace() {
 	}
 }
 
-func (l *sqlLexer) Lexing() []Token {
+func (l *sqlLexer) Lexing(sqlStatement string) []Token {
 	l.pos = 0 // Lexing is re-runnable: reset scan position each call
+	l.runes = []rune(sqlStatement)
 	tokens := make([]Token, 0)
 
 	for {

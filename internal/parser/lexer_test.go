@@ -7,55 +7,55 @@ import (
 )
 
 func TestLexing(t *testing.T) {
-	sqlLexer := NewLexer("select * from users")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: SELECT, Value: "select", Position: 0},
 		{Type: ASTERISK, Value: "*", Position: 7},
 		{Type: FROM, Value: "from", Position: 9},
 		{Type: IDENT, Value: "users", Position: 14},
 		{Type: EOF, Value: "EOF", Position: 19},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing("select * from users"))
 }
 
 func TestLexing_MultipleWhiteSpaces(t *testing.T) {
-	sqlLexer := NewLexer("select     * from     users")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: SELECT, Value: "select", Position: 0},
 		{Type: ASTERISK, Value: "*", Position: 11},
 		{Type: FROM, Value: "from", Position: 13},
 		{Type: IDENT, Value: "users", Position: 22},
 		{Type: EOF, Value: "EOF", Position: 27},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing("select     * from     users"))
 }
 
 func TestLexing_TrailingWhitespace(t *testing.T) {
-	sqlLexer := NewLexer("select * from users   ")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: SELECT, Value: "select", Position: 0},
 		{Type: ASTERISK, Value: "*", Position: 7},
 		{Type: FROM, Value: "from", Position: 9},
 		{Type: IDENT, Value: "users", Position: 14},
 		{Type: EOF, Value: "EOF", Position: 22},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing("select * from users   "))
 }
 
 func TestLexing_EmptyStatement(t *testing.T) {
-	sqlLexer := NewLexer("")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: EOF, Value: "EOF", Position: 0},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing(""))
 }
 
 func TestLexing_BlankStatement(t *testing.T) {
-	sqlLexer := NewLexer("    ")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: EOF, Value: "EOF", Position: 4},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing("    "))
 }
 
 func TestLexing_KeywordsAreCaseInsensitive(t *testing.T) {
-	sqlLexer := NewLexer("SELECT * FROM users WHERE id = 1 AND name != 'a' OR NOT flag")
-	tokens := sqlLexer.Lexing()
+	sqlLexer := NewLexer()
+	tokens := sqlLexer.Lexing("SELECT * FROM users WHERE id = 1 AND name != 'a' OR NOT flag")
 
 	expectedTypes := []TokenType{
 		SELECT, ASTERISK, FROM, IDENT, WHERE, IDENT, EQ, NUMBER,
@@ -68,8 +68,8 @@ func TestLexing_KeywordsAreCaseInsensitive(t *testing.T) {
 }
 
 func TestLexing_Punctuation(t *testing.T) {
-	sqlLexer := NewLexer("( ) , ; = != <> < <= > >=")
-	tokens := sqlLexer.Lexing()
+	sqlLexer := NewLexer()
+	tokens := sqlLexer.Lexing("( ) , ; = != <> < <= > >=")
 
 	expectedTypes := []TokenType{
 		LPAREN, RPAREN, COMMA, SEMICOLON, EQ, NEQ, NEQ, LT, LTE, GT, GTE, EOF,
@@ -81,15 +81,15 @@ func TestLexing_Punctuation(t *testing.T) {
 }
 
 func TestLexing_UnknownTokenIsIdent(t *testing.T) {
-	sqlLexer := NewLexer("some_unrecognized_token")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: IDENT, Value: "some_unrecognized_token", Position: 0},
 		{Type: EOF, Value: "EOF", Position: 23},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing("some_unrecognized_token"))
 }
 
 func TestLexing_CommaSeparatedFieldsAndComparison(t *testing.T) {
-	sqlLexer := NewLexer("SELECT id, name FROM users WHERE age > 18")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: SELECT, Value: "SELECT", Position: 0},
 		{Type: IDENT, Value: "id", Position: 7},
@@ -102,11 +102,11 @@ func TestLexing_CommaSeparatedFieldsAndComparison(t *testing.T) {
 		{Type: GT, Value: ">", Position: 37},
 		{Type: NUMBER, Value: "18", Position: 39},
 		{Type: EOF, Value: "EOF", Position: 41},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing("SELECT id, name FROM users WHERE age > 18"))
 }
 
 func TestLexing_TrailingSemicolonNoSpace(t *testing.T) {
-	sqlLexer := NewLexer("SELECT * FROM users;")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: SELECT, Value: "SELECT", Position: 0},
 		{Type: ASTERISK, Value: "*", Position: 7},
@@ -114,21 +114,21 @@ func TestLexing_TrailingSemicolonNoSpace(t *testing.T) {
 		{Type: IDENT, Value: "users", Position: 14},
 		{Type: SEMICOLON, Value: ";", Position: 19},
 		{Type: EOF, Value: "EOF", Position: 20},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing("SELECT * FROM users;"))
 }
 
 func TestLexing_NumberLiteral(t *testing.T) {
-	sqlLexer := NewLexer("age >= 18.5")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: IDENT, Value: "age", Position: 0},
 		{Type: GTE, Value: ">=", Position: 4},
 		{Type: NUMBER, Value: "18.5", Position: 7},
 		{Type: EOF, Value: "EOF", Position: 11},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing("age >= 18.5"))
 }
 
 func TestLexing_StringLiteral(t *testing.T) {
-	sqlLexer := NewLexer(`name = 'bob' AND note = "hi"`)
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: IDENT, Value: "name", Position: 0},
 		{Type: EQ, Value: "=", Position: 5},
@@ -138,33 +138,33 @@ func TestLexing_StringLiteral(t *testing.T) {
 		{Type: EQ, Value: "=", Position: 22},
 		{Type: STRING, Value: "hi", Position: 24},
 		{Type: EOF, Value: "EOF", Position: 28},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing(`name = 'bob' AND note = "hi"`))
 }
 
 func TestLexing_UnterminatedStringWithContent(t *testing.T) {
-	sqlLexer := NewLexer("name = 'bob")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: IDENT, Value: "name", Position: 0},
 		{Type: EQ, Value: "=", Position: 5},
 		{Type: ILLEGAL, Value: "'bob", Position: 7},
 		{Type: EOF, Value: "EOF", Position: 11},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing("name = 'bob"))
 }
 
 func TestLexing_UnterminatedStringNoContent(t *testing.T) {
-	sqlLexer := NewLexer("name = '")
+	sqlLexer := NewLexer()
 	assert.Equal(t, []Token{
 		{Type: IDENT, Value: "name", Position: 0},
 		{Type: EQ, Value: "=", Position: 5},
 		{Type: ILLEGAL, Value: "'", Position: 7},
 		{Type: EOF, Value: "EOF", Position: 8},
-	}, sqlLexer.Lexing())
+	}, sqlLexer.Lexing("name = '"))
 }
 
 func TestLexing_IsReRunnable(t *testing.T) {
-	sqlLexer := NewLexer("select * from users")
-	first := sqlLexer.Lexing()
-	second := sqlLexer.Lexing()
+	sqlLexer := NewLexer()
+	first := sqlLexer.Lexing("select * from users")
+	second := sqlLexer.Lexing("select * from users")
 
 	assert.Equal(t, first, second)
 }

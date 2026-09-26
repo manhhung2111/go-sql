@@ -8,8 +8,7 @@ import (
 
 func parse(t *testing.T, sql string) (SqlStatement, error) {
 	t.Helper()
-	tokens := NewLexer(sql).Lexing()
-	return NewParser(tokens).Parse()
+	return NewParser(NewLexer()).Parse(sql)
 }
 
 // valueStrings flattens [][]Token down to [][]string so tests can assert on
