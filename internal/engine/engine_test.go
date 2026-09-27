@@ -75,9 +75,9 @@ func TestEngine_ShowDatabases_Empty(t *testing.T) {
 func TestEngine_UnsupportedStatement(t *testing.T) {
 	e := NewEngine(NewCatalog())
 
-	_, err := e.Execute(parser.SelectStatement{Columns: []string{"*"}, Table: "users"}, testDatabase)
+	_, err := e.Execute(parser.UpdateStatement{Table: "users"}, testDatabase)
 
-	assert.EqualError(t, err, "statement not supported, got parser.SelectStatement")
+	assert.EqualError(t, err, "statement not supported, got parser.UpdateStatement")
 }
 
 func TestEngine_CreateTable(t *testing.T) {
@@ -329,6 +329,51 @@ func TestEngine_DropTable_TableDoesNotExist(t *testing.T) {
 	e := NewEngine(catalog)
 
 	_, err := e.Execute(parser.DropTableStatement{Table: "users"}, testDatabase)
+
+	assert.EqualError(t, err, `table "users" does not exist`)
+}
+
+func TestEngine_Select(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+	newTestTable(t, e)
+
+	_, err := e.Execute(parser.InsertIntoStatement{
+		Table:  "users",
+		Values: [][]parser.Token{{{Type: parser.NUMBER, Value: "1"}}},
+	}, testDatabase)
+	require.NoError(t, err)
+
+	resp, err := e.Execute(parser.SelectStatement{Table: "users", Columns: []string{"*"}}, testDatabase)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"id"}, resp.Columns)
+	assert.Equal(t, [][]string{{"1"}}, resp.Rows)
+}
+
+func TestEngine_Select_NoDatabaseSelected(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.SelectStatement{Table: "users", Columns: []string{"*"}}, "")
+
+	assert.EqualError(t, err, "database name is required")
+}
+
+func TestEngine_Select_DatabaseDoesNotExist(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.SelectStatement{Table: "users", Columns: []string{"*"}}, testDatabase)
+
+	assert.EqualError(t, err, `database "test" does not exist`)
+}
+
+func TestEngine_Select_TableDoesNotExist(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+
+	_, err := e.Execute(parser.SelectStatement{Table: "users", Columns: []string{"*"}}, testDatabase)
 
 	assert.EqualError(t, err, `table "users" does not exist`)
 }

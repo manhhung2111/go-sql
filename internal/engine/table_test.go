@@ -12,7 +12,16 @@ import (
 
 func numTok(v string) parser.Token               { return parser.Token{Type: parser.NUMBER, Value: v} }
 func strTok(v string) parser.Token               { return parser.Token{Type: parser.STRING, Value: v} }
+func identTok(v string) parser.Token             { return parser.Token{Type: parser.IDENT, Value: v} }
 func tokRow(toks ...parser.Token) []parser.Token { return toks }
+
+func cmp(left parser.Token, op parser.TokenType, right parser.Token) *parser.ComparisonExpression {
+	return &parser.ComparisonExpression{Left: left, Operator: op, Right: right}
+}
+
+func binary(left parser.Expression, op parser.TokenType, right parser.Expression) *parser.BinaryExpression {
+	return &parser.BinaryExpression{Left: left, Operator: op, Right: right}
+}
 
 func usersTable(t *testing.T, extraColumns ...parser.ColumnDefinition) *SqlTable {
 	t.Helper()
@@ -410,6 +419,164 @@ func TestTable_AlterColumns_RenameColumn_CollidingNewName(t *testing.T) {
 	err := table.AlterColumns(parser.RenameColumnAction{OldName: "name", NewName: "id"})
 
 	assert.EqualError(t, err, `column name "id" already exists`)
+}
+
+func TestTable_Select_Star(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+	}))
+
+	resp, err := table.Select([]string{"*"}, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"id", "name"}, resp.Columns)
+	assert.Equal(t, [][]string{{"1", "bob"}, {"2", "sam"}}, resp.Rows)
+}
+
+func TestTable_Select_ExplicitColumns(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+	}))
+
+	resp, err := table.Select([]string{"name", "id"}, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"name", "id"}, resp.Columns)
+	assert.Equal(t, [][]string{{"bob", "1"}}, resp.Rows)
+}
+
+func TestTable_Select_UnknownColumn(t *testing.T) {
+	table := usersTable(t)
+
+	_, err := table.Select([]string{"nickname"}, nil)
+
+	assert.EqualError(t, err, `unknown column "nickname"`)
+}
+
+func TestTable_Select_WhereComparisonFiltersRows(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+	}))
+
+	resp, err := table.Select([]string{"*"}, cmp(identTok("id"), parser.EQ, numTok("2")))
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"2", "sam"}}, resp.Rows)
+}
+
+func TestTable_Select_WhereLiteralOnLeft(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+	}))
+
+	resp, err := table.Select([]string{"*"}, cmp(numTok("2"), parser.EQ, identTok("id")))
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"2", "sam"}}, resp.Rows)
+}
+
+func TestTable_Select_WhereColumnToColumn(t *testing.T) {
+	table, err := NewTable("users", []parser.ColumnDefinition{
+		{Name: "id", DataType: parser.IntDataType{}},
+		{Name: "age", DataType: parser.IntDataType{}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), numTok("1")),  // id == age
+		tokRow(numTok("2"), numTok("99")), // id != age
+	}))
+
+	resp, err := table.Select([]string{"id"}, cmp(identTok("id"), parser.EQ, identTok("age")))
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"1"}}, resp.Rows)
+}
+
+func TestTable_Select_WhereColumnTypeMismatchErrors(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	_, err := table.Select([]string{"*"}, cmp(identTok("name"), parser.EQ, identTok("id")))
+
+	assert.EqualError(t, err, "cannot compare string and int64")
+}
+
+func TestTable_Select_WhereAnd(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("bob")),
+	}))
+
+	where := binary(
+		cmp(identTok("id"), parser.EQ, numTok("2")),
+		parser.AND,
+		cmp(identTok("name"), parser.EQ, strTok("bob")),
+	)
+	resp, err := table.Select([]string{"*"}, where)
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"2", "bob"}}, resp.Rows)
+}
+
+func TestTable_Select_WhereOr(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+		tokRow(numTok("3"), strTok("eve")),
+	}))
+
+	where := binary(
+		cmp(identTok("id"), parser.EQ, numTok("1")),
+		parser.OR,
+		cmp(identTok("id"), parser.EQ, numTok("3")),
+	)
+	resp, err := table.Select([]string{"id"}, where)
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"1"}, {"3"}}, resp.Rows)
+}
+
+func TestTable_Select_WhereUnknownColumn(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	_, err := table.Select([]string{"*"}, cmp(identTok("nickname"), parser.EQ, strTok("bob")))
+
+	assert.EqualError(t, err, `unknown column "nickname"`)
+}
+
+func TestTable_Select_WhereNullNeverMatches(t *testing.T) {
+	table := usersTable(t, parser.ColumnDefinition{Name: "age", DataType: parser.IntDataType{}})
+	require.NoError(t, table.InsertValues([]string{"id", "name"}, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")), // age omitted, stays NULL
+	}))
+
+	eq, err := table.Select([]string{"*"}, cmp(identTok("age"), parser.EQ, numTok("18")))
+	require.NoError(t, err)
+	assert.Empty(t, eq.Rows, "NULL = 18 must not match")
+
+	neq, err := table.Select([]string{"*"}, cmp(identTok("age"), parser.NEQ, numTok("18")))
+	require.NoError(t, err)
+	assert.Empty(t, neq.Rows, "NULL != 18 must not match either")
+}
+
+func TestTable_Select_NoMatches(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	resp, err := table.Select([]string{"*"}, cmp(identTok("id"), parser.EQ, numTok("99")))
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{}, resp.Rows)
 }
 
 func TestTable_Rename(t *testing.T) {

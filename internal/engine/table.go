@@ -8,6 +8,7 @@ import (
 
 type Table interface {
 	InsertValues(columns []string, values [][]parser.Token) error
+	Select(columns []string, where parser.Expression) (Response, error)
 	AlterColumns(action parser.AlterAction) error
 	Rename(name string)
 }
@@ -188,6 +189,55 @@ func (t *SqlTable) InsertValues(columns []string, values [][]parser.Token) error
 
 	t.Rows = append(t.Rows, newRows...)
 	return nil
+}
+
+// Select performs a full-table scan, keeping rows where matches (a nil
+// where matches every row), then projects each matching row down to
+// columns ("*" expands to every column in schema order).
+func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	columnIndex := make(map[string]int, len(t.Columns))
+	for i, col := range t.Columns {
+		columnIndex[col.Name] = i
+	}
+
+	outputColumns := columns
+	if len(outputColumns) == 1 && outputColumns[0] == "*" {
+		outputColumns = make([]string, len(t.Columns))
+		for i, col := range t.Columns {
+			outputColumns[i] = col.Name
+		}
+	}
+
+	outputIndices := make([]int, len(outputColumns))
+	for i, name := range outputColumns {
+		idx, ok := columnIndex[name]
+		if !ok {
+			return Response{}, fmt.Errorf("unknown column %q", name)
+		}
+		outputIndices[i] = idx
+	}
+
+	rows := make([][]string, 0, len(t.Rows))
+	for _, row := range t.Rows {
+		matched, err := evalWhere(where, row, columnIndex, t.Columns)
+		if err != nil {
+			return Response{}, err
+		}
+		if !matched {
+			continue
+		}
+
+		projected := make([]string, len(outputIndices))
+		for i, idx := range outputIndices {
+			projected[i] = stringifyValue(row[idx])
+		}
+		rows = append(rows, projected)
+	}
+
+	return Response{Columns: outputColumns, Rows: rows}, nil
 }
 
 // AlterColumns applies an ADD/DROP/RENAME COLUMN action. RENAME TO is

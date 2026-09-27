@@ -17,6 +17,26 @@ func NewEngine(catalog Catalog) Engine {
 	return &SqlEngine{Catalog: catalog}
 }
 
+// resolveDatabase requires dbName to be non-empty, then looks it up in the
+// catalog — every table-level statement needs both checks before it can
+// reach its table.
+func (e *SqlEngine) resolveDatabase(dbName string) (Database, error) {
+	if dbName == "" {
+		return nil, fmt.Errorf("database name is required")
+	}
+	return e.Catalog.GetDatabase(dbName)
+}
+
+// resolveTable looks up name in database, turning a missing table into the
+// error every table-level statement reports.
+func resolveTable(database Database, name string) (Table, error) {
+	table, exists := database.GetTable(name)
+	if !exists {
+		return nil, fmt.Errorf("table %q does not exist", name)
+	}
+	return table, nil
+}
+
 func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Response, error) {
 	switch stmt := statement.(type) {
 	case parser.CreateDatabaseStatement:
@@ -42,11 +62,7 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 		return Response{Columns: []string{"Database"}, Rows: rows}, nil
 
 	case parser.CreateTableStatement:
-		if dbName == "" {
-			return Response{}, fmt.Errorf("database name is required")
-		}
-
-		database, err := e.Catalog.GetDatabase(dbName)
+		database, err := e.resolveDatabase(dbName)
 		if err != nil {
 			return Response{}, err
 		}
@@ -58,18 +74,14 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 		return Response{}, nil
 
 	case parser.InsertIntoStatement:
-		if dbName == "" {
-			return Response{}, fmt.Errorf("database name is required")
-		}
-
-		database, err := e.Catalog.GetDatabase(dbName)
+		database, err := e.resolveDatabase(dbName)
 		if err != nil {
 			return Response{}, err
 		}
 
-		table, exists := database.GetTable(stmt.Table)
-		if !exists {
-			return Response{}, fmt.Errorf("table %q does not exist", stmt.Table)
+		table, err := resolveTable(database, stmt.Table)
+		if err != nil {
+			return Response{}, err
 		}
 
 		if err := table.InsertValues(stmt.Columns, stmt.Values); err != nil {
@@ -79,11 +91,7 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 		return Response{}, nil
 
 	case parser.AlterTableStatement:
-		if dbName == "" {
-			return Response{}, fmt.Errorf("database name is required")
-		}
-
-		database, err := e.Catalog.GetDatabase(dbName)
+		database, err := e.resolveDatabase(dbName)
 		if err != nil {
 			return Response{}, err
 		}
@@ -95,9 +103,9 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 			return Response{}, nil
 		}
 
-		table, exists := database.GetTable(stmt.Table)
-		if !exists {
-			return Response{}, fmt.Errorf("table %q does not exist", stmt.Table)
+		table, err := resolveTable(database, stmt.Table)
+		if err != nil {
+			return Response{}, err
 		}
 
 		if err := table.AlterColumns(stmt.Action); err != nil {
@@ -107,11 +115,7 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 		return Response{}, nil
 
 	case parser.DropTableStatement:
-		if dbName == "" {
-			return Response{}, fmt.Errorf("database name is required")
-		}
-
-		database, err := e.Catalog.GetDatabase(dbName)
+		database, err := e.resolveDatabase(dbName)
 		if err != nil {
 			return Response{}, err
 		}
@@ -121,6 +125,20 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 		}
 
 		return Response{}, nil
+
+	case parser.SelectStatement:
+		database, err := e.resolveDatabase(dbName)
+		if err != nil {
+			return Response{}, err
+		}
+
+		table, err := resolveTable(database, stmt.Table)
+		if err != nil {
+			return Response{}, err
+		}
+
+		return table.Select(stmt.Columns, stmt.Where)
+
 	default:
 		return Response{}, fmt.Errorf("statement not supported, got %T", stmt)
 	}
