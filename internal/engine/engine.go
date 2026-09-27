@@ -139,6 +139,23 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 
 		return table.Select(stmt.Columns, stmt.Where)
 
+	case parser.DeleteStatement:
+		database, err := e.resolveDatabase(dbName)
+		if err != nil {
+			return Response{}, err
+		}
+
+		table, err := resolveTable(database, stmt.Table)
+		if err != nil {
+			return Response{}, err
+		}
+
+		if err := table.Delete(stmt.Where); err != nil {
+			return Response{}, err
+		}
+
+		return Response{}, nil
+
 	default:
 		return Response{}, fmt.Errorf("statement not supported, got %T", stmt)
 	}

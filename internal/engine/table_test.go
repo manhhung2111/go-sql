@@ -579,6 +579,76 @@ func TestTable_Select_NoMatches(t *testing.T) {
 	assert.Equal(t, [][]string{}, resp.Rows)
 }
 
+func TestTable_Delete_WhereFiltersRows(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+		tokRow(numTok("3"), strTok("eve")),
+	}))
+
+	err := table.Delete(cmp(identTok("id"), parser.EQ, numTok("2")))
+
+	require.NoError(t, err)
+	assert.Equal(t, []any{int64(1), "bob"}, table.Rows[0])
+	assert.Equal(t, []any{int64(3), "eve"}, table.Rows[1])
+	assert.Len(t, table.Rows, 2)
+}
+
+func TestTable_Delete_NoWhereDeletesEverything(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+	}))
+
+	err := table.Delete(nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, table.Rows)
+}
+
+func TestTable_Delete_NoMatches(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	err := table.Delete(cmp(identTok("id"), parser.EQ, numTok("99")))
+
+	require.NoError(t, err)
+	assert.Len(t, table.Rows, 1)
+}
+
+func TestTable_Delete_UnknownColumnLeavesTableUntouched(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+	}))
+
+	err := table.Delete(cmp(identTok("nickname"), parser.EQ, strTok("bob")))
+
+	assert.EqualError(t, err, `unknown column "nickname"`)
+	assert.Len(t, table.Rows, 2, "a rejected DELETE must not partially compact the table")
+}
+
+func TestTable_Delete_Concurrent(t *testing.T) {
+	table := usersTable(t)
+	const n = 50
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = table.Delete(nil)
+		}()
+	}
+	wg.Wait()
+
+	assert.Empty(t, table.Rows)
+}
+
 func TestTable_Rename(t *testing.T) {
 	table := usersTable(t)
 

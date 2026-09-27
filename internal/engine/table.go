@@ -10,6 +10,7 @@ type Table interface {
 	InsertValues(columns []string, values [][]parser.Token) error
 	Select(columns []string, where parser.Expression) (Response, error)
 	AlterColumns(action parser.AlterAction) error
+	Delete(where parser.Expression) error
 	Rename(name string)
 }
 
@@ -349,6 +350,35 @@ func (t *SqlTable) renameColumn(oldName, newName string) error {
 	}
 
 	t.Columns[idx].Name = newName
+	return nil
+}
+
+// Delete removes every row matching where (a nil where matches every row,
+// so a bare DELETE FROM wipes the table). Rows are collected into a fresh
+// buffer of survivors and only committed via one final assignment, so an
+// error partway through (e.g. an unknown column in where) leaves t.Rows
+// completely untouched rather than partially compacted.
+func (t *SqlTable) Delete(where parser.Expression) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	columnIndex := make(map[string]int, len(t.Columns))
+	for i, col := range t.Columns {
+		columnIndex[col.Name] = i
+	}
+
+	kept := make([][]any, 0, len(t.Rows))
+	for _, row := range t.Rows {
+		matched, err := evalWhere(where, row, columnIndex, t.Columns)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			kept = append(kept, row)
+		}
+	}
+
+	t.Rows = kept
 	return nil
 }
 

@@ -264,6 +264,44 @@ func TestParseQuery_DropTable(t *testing.T) {
 	assert.Equal(t, `table "users" does not exist`, resp.GetErrorMessage())
 }
 
+func TestParseQuery_Delete(t *testing.T) {
+	client := newTestClient(t)
+
+	resp, err := client.ParseQuery(context.Background(), &sqlpb.QueryRequest{Sql: "CREATE DATABASE testdb"})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "CREATE TABLE users (id INT, name VARCHAR(50))",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "INSERT INTO users (id, name) VALUES (1, 'bob'), (2, 'sam')",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "DELETE FROM users WHERE id = 1",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+	assert.Empty(t, resp.GetErrorMessage())
+
+	resp, err = client.ParseQuery(context.Background(), &sqlpb.QueryRequest{
+		Sql:      "SELECT * FROM users",
+		Database: "testdb",
+	})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
+	assert.Equal(t, [][]string{{"2", "sam"}}, rowStrings(resp.GetRows()))
+}
+
 func TestParseQuery_Select(t *testing.T) {
 	client := newTestClient(t)
 
