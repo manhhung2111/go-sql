@@ -156,6 +156,23 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 
 		return Response{}, nil
 
+	case parser.UpdateStatement:
+		database, err := e.resolveDatabase(dbName)
+		if err != nil {
+			return Response{}, err
+		}
+
+		table, err := resolveTable(database, stmt.Table)
+		if err != nil {
+			return Response{}, err
+		}
+
+		if err := table.Update(stmt.Set, stmt.Where); err != nil {
+			return Response{}, err
+		}
+
+		return Response{}, nil
+
 	default:
 		return Response{}, fmt.Errorf("statement not supported, got %T", stmt)
 	}

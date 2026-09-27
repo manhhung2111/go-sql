@@ -649,6 +649,128 @@ func TestTable_Delete_Concurrent(t *testing.T) {
 	assert.Empty(t, table.Rows)
 }
 
+func assign(column string, value parser.Token) parser.Assignment {
+	return parser.Assignment{Column: column, Value: value}
+}
+
+func TestTable_Update_WhereFiltersRows(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+	}))
+
+	err := table.Update(
+		[]parser.Assignment{assign("name", strTok("robert"))},
+		cmp(identTok("id"), parser.EQ, numTok("1")),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, []any{int64(1), "robert"}, table.Rows[0])
+	assert.Equal(t, []any{int64(2), "sam"}, table.Rows[1], "unmatched rows must be untouched")
+}
+
+func TestTable_Update_NoWhereUpdatesEverything(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("bob")),
+		tokRow(numTok("2"), strTok("sam")),
+	}))
+
+	err := table.Update([]parser.Assignment{assign("name", strTok("anon"))}, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, "anon", table.Rows[0][1])
+	assert.Equal(t, "anon", table.Rows[1][1])
+}
+
+func TestTable_Update_MultipleAssignments(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	err := table.Update(
+		[]parser.Assignment{assign("id", numTok("99")), assign("name", strTok("robert"))},
+		nil,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, []any{int64(99), "robert"}, table.Rows[0])
+}
+
+func TestTable_Update_UnknownColumnInSet(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	err := table.Update([]parser.Assignment{assign("nickname", strTok("bob"))}, nil)
+
+	assert.EqualError(t, err, `unknown column "nickname"`)
+	assert.Equal(t, "bob", table.Rows[0][1], "a rejected UPDATE must not partially apply")
+}
+
+func TestTable_Update_UnknownColumnInWhere(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	err := table.Update(
+		[]parser.Assignment{assign("name", strTok("robert"))},
+		cmp(identTok("nickname"), parser.EQ, strTok("bob")),
+	)
+
+	assert.EqualError(t, err, `unknown column "nickname"`)
+	assert.Equal(t, "bob", table.Rows[0][1])
+}
+
+func TestTable_Update_WrongLiteralKind(t *testing.T) {
+	table := usersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))}))
+
+	err := table.Update([]parser.Assignment{assign("id", strTok("not-a-number"))}, nil)
+
+	assert.EqualError(t, err, `column "id": expected a numeric value, got not-a-number`)
+	assert.Equal(t, int64(1), table.Rows[0][0], "a rejected UPDATE must not partially apply")
+}
+
+func TestTable_Update_DuplicateAgainstAnotherRow(t *testing.T) {
+	table := uniqueUsersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("a@x.com")),
+		tokRow(numTok("2"), strTok("b@x.com")),
+	}))
+
+	err := table.Update(
+		[]parser.Assignment{assign("email", strTok("b@x.com"))},
+		cmp(identTok("id"), parser.EQ, numTok("1")),
+	)
+
+	assert.EqualError(t, err, `duplicate entry b@x.com for column "email"`)
+	assert.Equal(t, "a@x.com", table.Rows[0][1], "a rejected UPDATE must not partially apply")
+}
+
+func TestTable_Update_DuplicateWithinSameBatch(t *testing.T) {
+	table := uniqueUsersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{
+		tokRow(numTok("1"), strTok("a@x.com")),
+		tokRow(numTok("2"), strTok("b@x.com")),
+	}))
+
+	err := table.Update([]parser.Assignment{assign("email", strTok("same@x.com"))}, nil)
+
+	assert.EqualError(t, err, `duplicate entry same@x.com for column "email"`)
+}
+
+func TestTable_Update_ReassigningUniqueColumnToItsOwnValueSucceeds(t *testing.T) {
+	table := uniqueUsersTable(t)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("a@x.com"))}))
+
+	err := table.Update(
+		[]parser.Assignment{assign("email", strTok("a@x.com"))},
+		cmp(identTok("id"), parser.EQ, numTok("1")),
+	)
+
+	require.NoError(t, err, "re-assigning a unique column to its current value must not self-conflict")
+	assert.Equal(t, "a@x.com", table.Rows[0][1])
+}
+
 func TestTable_Rename(t *testing.T) {
 	table := usersTable(t)
 

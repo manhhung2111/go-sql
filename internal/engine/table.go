@@ -11,6 +11,7 @@ type Table interface {
 	Select(columns []string, where parser.Expression) (Response, error)
 	AlterColumns(action parser.AlterAction) error
 	Delete(where parser.Expression) error
+	Update(assignments []parser.Assignment, where parser.Expression) error
 	Rename(name string)
 }
 
@@ -379,6 +380,110 @@ func (t *SqlTable) Delete(where parser.Expression) error {
 	}
 
 	t.Rows = kept
+	return nil
+}
+
+// resolvedAssignment is an Assignment resolved to its schema index and
+// coerced value, computed once per Update call rather than per row — the
+// same reasoning as InsertValues's fillers: a SET column = literal value is
+// static across every matched row.
+type resolvedAssignment struct {
+	index int
+	value any
+}
+
+// Update applies assignments to every row matching where (a nil where
+// matches every row, same as Delete), enforcing PRIMARY KEY/UNIQUE on any
+// assigned column. NOT NULL is a non-issue here: the parser only accepts a
+// STRING or NUMBER literal on the right of SET, so an assignment can never
+// produce NULL. Rows are built into a fresh buffer and only committed via
+// one final assignment, so a failure partway through (e.g. a coercion
+// error or a uniqueness violation) leaves the table completely untouched.
+func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expression) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	columnIndex := make(map[string]int, len(t.Columns))
+	for i, col := range t.Columns {
+		columnIndex[col.Name] = i
+	}
+
+	resolved := make([]resolvedAssignment, len(assignments))
+	for i, a := range assignments {
+		idx, ok := columnIndex[a.Column]
+		if !ok {
+			return fmt.Errorf("unknown column %q", a.Column)
+		}
+		coerced, err := coerceValue(t.Columns[idx].DataType, a.Value)
+		if err != nil {
+			return fmt.Errorf("column %q: %v", t.Columns[idx].Name, err)
+		}
+		resolved[i] = resolvedAssignment{index: idx, value: coerced}
+	}
+
+	// Determine which rows match, once, so the uniqueness seed below can
+	// be built from exactly the rows that are staying unchanged.
+	matched := make([]bool, len(t.Rows))
+	for i, row := range t.Rows {
+		m, err := evalWhere(where, row, columnIndex, t.Columns)
+		if err != nil {
+			return err
+		}
+		matched[i] = m
+	}
+
+	// Seed a uniqueness set per PRIMARY KEY/UNIQUE column touched by an
+	// assignment, from every row NOT being updated — those values stay
+	// occupied. A matched row's own old value is deliberately excluded, so
+	// re-assigning a column back to its current value never self-conflicts.
+	uniqueColumns := make([]int, 0)
+	for _, a := range resolved {
+		col := t.Columns[a.index]
+		if col.IsPrimaryKey() || col.IsUnique() {
+			uniqueColumns = append(uniqueColumns, a.index)
+		}
+	}
+	uniqueValues := make(map[int]map[any]bool, len(uniqueColumns))
+	for _, idx := range uniqueColumns {
+		set := make(map[any]bool, len(t.Rows))
+		for i, row := range t.Rows {
+			if matched[i] {
+				continue
+			}
+			if v := row[idx]; v != nil {
+				set[v] = true
+			}
+		}
+		uniqueValues[idx] = set
+	}
+
+	newRows := make([][]any, len(t.Rows))
+	for i, row := range t.Rows {
+		if !matched[i] {
+			newRows[i] = row
+			continue
+		}
+
+		updated := append([]any{}, row...)
+		for _, a := range resolved {
+			updated[a.index] = a.value
+		}
+
+		for _, idx := range uniqueColumns {
+			value := updated[idx]
+			if value == nil {
+				continue
+			}
+			if uniqueValues[idx][value] {
+				return fmt.Errorf("duplicate entry %v for column %q", value, t.Columns[idx].Name)
+			}
+			uniqueValues[idx][value] = true
+		}
+
+		newRows[i] = updated
+	}
+
+	t.Rows = newRows
 	return nil
 }
 
