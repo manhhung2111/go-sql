@@ -72,12 +72,18 @@ func TestEngine_ShowDatabases_Empty(t *testing.T) {
 	assert.Empty(t, resp.Rows)
 }
 
+// unsupportedStatement satisfies parser.SqlStatement (an empty interface)
+// without matching any case in Engine.Execute's switch — every real
+// statement type the parser produces is handled, so this fabricated type
+// is the only way left to exercise the default branch.
+type unsupportedStatement struct{}
+
 func TestEngine_UnsupportedStatement(t *testing.T) {
 	e := NewEngine(NewCatalog())
 
-	_, err := e.Execute(parser.UpdateStatement{Table: "users"}, testDatabase)
+	_, err := e.Execute(unsupportedStatement{}, testDatabase)
 
-	assert.EqualError(t, err, "statement not supported, got parser.UpdateStatement")
+	assert.EqualError(t, err, "statement not supported, got engine.unsupportedStatement")
 }
 
 func TestEngine_CreateTable(t *testing.T) {
@@ -374,6 +380,105 @@ func TestEngine_Select_TableDoesNotExist(t *testing.T) {
 	e := NewEngine(catalog)
 
 	_, err := e.Execute(parser.SelectStatement{Table: "users", Columns: []string{"*"}}, testDatabase)
+
+	assert.EqualError(t, err, `table "users" does not exist`)
+}
+
+func TestEngine_Delete(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+	newTestTable(t, e)
+
+	_, err := e.Execute(parser.InsertIntoStatement{
+		Table:  "users",
+		Values: [][]parser.Token{{{Type: parser.NUMBER, Value: "1"}}},
+	}, testDatabase)
+	require.NoError(t, err)
+
+	resp, err := e.Execute(parser.DeleteStatement{Table: "users"}, testDatabase)
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{}, resp)
+
+	rows, err := e.Execute(parser.SelectStatement{Table: "users", Columns: []string{"*"}}, testDatabase)
+	require.NoError(t, err)
+	assert.Empty(t, rows.Rows)
+}
+
+func TestEngine_Delete_NoDatabaseSelected(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.DeleteStatement{Table: "users"}, "")
+
+	assert.EqualError(t, err, "database name is required")
+}
+
+func TestEngine_Delete_DatabaseDoesNotExist(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.DeleteStatement{Table: "users"}, testDatabase)
+
+	assert.EqualError(t, err, `database "test" does not exist`)
+}
+
+func TestEngine_Delete_TableDoesNotExist(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+
+	_, err := e.Execute(parser.DeleteStatement{Table: "users"}, testDatabase)
+
+	assert.EqualError(t, err, `table "users" does not exist`)
+}
+
+func TestEngine_Update(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+	newTestTable(t, e)
+
+	_, err := e.Execute(parser.InsertIntoStatement{
+		Table:  "users",
+		Values: [][]parser.Token{{{Type: parser.NUMBER, Value: "1"}}},
+	}, testDatabase)
+	require.NoError(t, err)
+
+	resp, err := e.Execute(parser.UpdateStatement{
+		Table: "users",
+		Set:   []parser.Assignment{{Column: "id", Value: parser.Token{Type: parser.NUMBER, Value: "2"}}},
+	}, testDatabase)
+
+	require.NoError(t, err)
+	assert.Equal(t, Response{}, resp)
+
+	rows, err := e.Execute(parser.SelectStatement{Table: "users", Columns: []string{"*"}}, testDatabase)
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"2"}}, rows.Rows)
+}
+
+func TestEngine_Update_NoDatabaseSelected(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.UpdateStatement{Table: "users"}, "")
+
+	assert.EqualError(t, err, "database name is required")
+}
+
+func TestEngine_Update_DatabaseDoesNotExist(t *testing.T) {
+	e := NewEngine(NewCatalog())
+
+	_, err := e.Execute(parser.UpdateStatement{Table: "users"}, testDatabase)
+
+	assert.EqualError(t, err, `database "test" does not exist`)
+}
+
+func TestEngine_Update_TableDoesNotExist(t *testing.T) {
+	catalog := NewCatalog()
+	require.NoError(t, catalog.CreateDatabase(testDatabase))
+	e := NewEngine(catalog)
+
+	_, err := e.Execute(parser.UpdateStatement{Table: "users"}, testDatabase)
 
 	assert.EqualError(t, err, `table "users" does not exist`)
 }
