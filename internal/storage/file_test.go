@@ -411,3 +411,16 @@ func TestSqlFile_FailedWriteDropsTailCache(t *testing.T) {
 		assert.Equal(t, []string{"a", "b", "c"}, rowStrings(scanAll(t, f)), "the failed delete was not flushed by a later write")
 	})
 }
+
+// MaxRowSize is the limit callers outside the package use to reject an
+// oversized row before writing anything: it must be exactly what Insert
+// accepts.
+func TestMaxRowSize(t *testing.T) {
+	f, _ := newTestFile(t)
+
+	_, err := f.Insert(make([]byte, MaxRowSize))
+	require.NoError(t, err, "a row of exactly MaxRowSize fits on a page of its own")
+
+	_, err = f.Insert(make([]byte, MaxRowSize+1))
+	assert.Error(t, err, "one byte more is rejected")
+}

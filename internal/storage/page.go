@@ -16,6 +16,11 @@ const (
 	// row itself would need.
 	maxRowSize = maxPageSize - pageHeaderSize - slotSize
 
+	// MaxRowSize is maxRowSize for callers outside this package: the largest
+	// row Insert will accept, so a caller can reject an oversized row before
+	// writing the first row of a batch.
+	MaxRowSize = maxRowSize
+
 	// Header field positions. The header is little-endian:
 	// checksum(0:4) | page number(4:8) | slot count(8:10) | data start(10:12).
 	checksumPos   = 0
