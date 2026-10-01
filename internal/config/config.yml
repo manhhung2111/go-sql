@@ -1,3 +1,6 @@
 server:
   port: 50051
   host: 127.0.0.1
+
+storage:
+  data_dir: ./data
