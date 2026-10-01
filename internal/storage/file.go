@@ -25,8 +25,10 @@ type Row struct {
 // calls Sync once at the end of a statement, so a many-row statement pays
 // for one fsync rather than one per row.
 //
-// A File is not safe for concurrent use; the owning table's lock serializes
-// access.
+// Any number of Scans may run concurrently with one another: a scan only
+// reads. Insert, Delete, Sync and Close must not run concurrently with
+// anything else, so the owning table takes its write lock for them and only
+// its read lock for a scan.
 type File interface {
 	Insert(rowBytes []byte) (RowID, error)
 	Delete(id RowID) error

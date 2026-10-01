@@ -342,9 +342,12 @@ func discardFile(path string, file storage.File) {
 	_ = os.Remove(path)
 }
 
-// Select performs a full-table scan, keeping rows where matches (a nil
-// where matches every row), then projects each matching row down to
-// columns ("*" expands to every column in schema order).
+// Select performs a full-table scan of the table's file, a page at a time,
+// keeping rows where matches (a nil where matches every row), then projects
+// each matching row down to columns ("*" expands to every column in schema
+// order). Only the matching, projected rows are held in memory. Rows come
+// back in the file's order: insertion order, except that an updated row has
+// moved to the end.
 func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -371,8 +374,19 @@ func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, 
 		outputIndices[i] = idx
 	}
 
-	rows := make([][]string, 0, len(t.Rows))
-	for _, row := range t.Rows {
+	if t.file == nil {
+		return Response{}, fmt.Errorf("table %q is closed", t.Name)
+	}
+
+	rows := make([][]string, 0)
+	for fileRow, err := range t.file.Scan() {
+		if err != nil {
+			return Response{}, err
+		}
+		row, err := DecodeRow(t.Columns, fileRow.Bytes)
+		if err != nil {
+			return Response{}, err
+		}
 		matched, err := evalWhere(where, row, columnIndex, t.Columns)
 		if err != nil {
 			return Response{}, err

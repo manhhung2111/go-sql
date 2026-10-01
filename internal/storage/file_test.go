@@ -3,6 +3,8 @@ package storage
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -423,4 +425,32 @@ func TestMaxRowSize(t *testing.T) {
 
 	_, err = f.Insert(make([]byte, MaxRowSize+1))
 	assert.Error(t, err, "one byte more is rejected")
+}
+
+// Select holds only the table's read lock, so several scans of one file can
+// run at once; Scan must therefore only read. This is meaningful under -race.
+func TestSqlFile_ScansMayRunConcurrently(t *testing.T) {
+	f, _ := newTestFile(t)
+	const n = 3000 // about 13 bytes a row with its slot, so a few pages
+	for i := 0; i < n; i++ {
+		_, err := f.Insert([]byte("row-" + strconv.Itoa(i)))
+		require.NoError(t, err)
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			count := 0
+			for _, err := range f.Scan() {
+				if !assert.NoError(t, err) {
+					return
+				}
+				count++
+			}
+			assert.Equal(t, n, count)
+		}()
+	}
+	wg.Wait()
 }
