@@ -27,11 +27,10 @@ type SqlTable struct {
 	mu      sync.RWMutex
 	Name    string
 	Columns []parser.ColumnDefinition
-	Rows    [][]any
 
-	// path and file are the table's heap file. INSERT and ALTER ADD/DROP
-	// COLUMN keep it a copy of Rows; the other statements and every read
-	// still use Rows alone until they are migrated.
+	// path and file are the table's heap file: the only copy of its rows.
+	// Every statement reads and writes it under mu, and none holds a whole
+	// table in memory.
 	path string
 	file storage.File
 
@@ -65,7 +64,7 @@ func NewTable(name string, columns []parser.ColumnDefinition, files *fileAllocat
 	}
 
 	return &SqlTable{
-		Name: name, Columns: columns, Rows: make([][]any, 0),
+		Name: name, Columns: columns,
 		path: path, file: file, files: files, database: database,
 	}, nil
 }
@@ -119,8 +118,8 @@ func validateNewColumn(tableName string, existing []parser.ColumnDefinition, col
 	return nil
 }
 
-// InsertValues appends rows to the table, coercing each value against its
-// column's DataType and enforcing NOT NULL/PRIMARY KEY/UNIQUE.
+// InsertValues appends rows to the table's file, coercing each value against
+// its column's DataType and enforcing NOT NULL/PRIMARY KEY/UNIQUE.
 func (t *SqlTable) InsertValues(columns []string, values [][]parser.Token) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -180,72 +179,133 @@ func (t *SqlTable) InsertValues(columns []string, values [][]parser.Token) error
 		fillers[i] = nil
 	}
 
-	// Seed a uniqueness set per PRIMARY KEY/UNIQUE column from existing
-	// rows, once. Checking-and-inserting into the same set as each new
-	// row is processed catches a duplicate against existing data and a
-	// duplicate within this same batch (e.g. VALUES (1), (1)) uniformly.
 	uniqueColumns := make([]int, 0)
 	for i, col := range t.Columns {
 		if col.IsPrimaryKey() || col.IsUnique() {
 			uniqueColumns = append(uniqueColumns, i)
 		}
 	}
-	uniqueValues := make(map[int]map[any]bool, len(uniqueColumns))
+
+	// Phase 2: build every row into a fresh buffer, stopping at the first row
+	// that cannot be built. That error is held back rather than returned: a
+	// duplicate key in an earlier row has always been reported before a later
+	// row's error, because rows used to be checked one at a time, and still is.
+	newRows := make([][]any, 0, len(values))
+	var rowErr error
+	for _, row := range values {
+		rowValues, err := t.buildRow(row, targetColumns, targetIndices, fillers)
+		if err != nil {
+			rowErr = err
+			break
+		}
+		newRows = append(newRows, rowValues)
+	}
+
+	// Phase 3: PRIMARY KEY/UNIQUE, against the rows already in the file and
+	// against earlier rows of this batch.
+	if err := t.checkUniqueness(newRows, uniqueColumns); err != nil {
+		return err
+	}
+	if rowErr != nil {
+		return rowErr
+	}
+
+	// Phase 4: write the whole batch; nothing is written unless every row is
+	// good, so a failure never leaves the table half-inserted.
+	return t.appendToFile(newRows)
+}
+
+// buildRow validates one row of an INSERT, coerces its values against their
+// columns' DataTypes, and fills in the columns the insert did not name.
+func (t *SqlTable) buildRow(row []parser.Token, targetColumns []string, targetIndices []int, fillers map[int]any) ([]any, error) {
+	if len(row) != len(targetColumns) {
+		return nil, fmt.Errorf("expected %d values, got %d", len(targetColumns), len(row))
+	}
+
+	rowValues := make([]any, len(t.Columns))
+	for j, tok := range row {
+		idx := targetIndices[j]
+		coerced, err := coerceValue(t.Columns[idx].DataType, tok)
+		if err != nil {
+			return nil, fmt.Errorf("column %q: %v", t.Columns[idx].Name, err)
+		}
+		rowValues[idx] = coerced
+	}
+	for idx, filler := range fillers {
+		rowValues[idx] = filler // already coerced once, in phase 1
+	}
+	return rowValues, nil
+}
+
+// checkUniqueness reports the first PRIMARY KEY/UNIQUE violation among
+// newRows, checked in row order against the rows already in the table's file
+// and against the earlier rows of the batch. Only the key values newRows
+// insert can conflict with an existing row, so those are collected first and
+// the file is streamed once against them: memory is proportional to the
+// statement, not the table. NULLs never conflict.
+func (t *SqlTable) checkUniqueness(newRows [][]any, uniqueColumns []int) error {
+	candidates := make(map[int]map[any]bool, len(uniqueColumns))
+	anyCandidate := false
 	for _, idx := range uniqueColumns {
-		set := make(map[any]bool, len(t.Rows))
-		for _, existingRow := range t.Rows {
-			if v := existingRow[idx]; v != nil {
+		set := make(map[any]bool, len(newRows))
+		for _, row := range newRows {
+			if v := row[idx]; v != nil {
 				set[v] = true
+				anyCandidate = true
 			}
 		}
-		uniqueValues[idx] = set
+		candidates[idx] = set
+	}
+	if !anyCandidate {
+		return nil
 	}
 
-	// Phase 2: validate, coerce, and check constraints for every row into
-	// a fresh buffer; only commit to t.Rows once the whole batch is known
-	// good, so a failure partway through a multi-row INSERT never leaves
-	// the table half-inserted.
-	newRows := make([][]any, len(values))
-	for i, row := range values {
-		if len(row) != len(targetColumns) {
-			return fmt.Errorf("expected %d values, got %d", len(targetColumns), len(row))
-		}
-
-		rowValues := make([]any, len(t.Columns))
-		for j, tok := range row {
-			idx := targetIndices[j]
-			coerced, err := coerceValue(t.Columns[idx].DataType, tok)
-			if err != nil {
-				return fmt.Errorf("column %q: %v", t.Columns[idx].Name, err)
-			}
-			rowValues[idx] = coerced
-		}
-		for idx, filler := range fillers {
-			rowValues[idx] = filler // already coerced once, in phase 1
-		}
-
-		for _, idx := range uniqueColumns {
-			value := rowValues[idx]
-			if value == nil {
-				continue // multiple NULLs are allowed in a UNIQUE column
-			}
-			if uniqueValues[idx][value] {
-				return fmt.Errorf("duplicate entry %v for column %q", value, t.Columns[idx].Name)
-			}
-			uniqueValues[idx][value] = true
-		}
-
-		newRows[i] = rowValues
-	}
-
-	// Phase 3: mirror the batch onto the table's file before committing it
-	// to Rows, so a failed write leaves Rows untouched.
-	if err := t.appendToFile(newRows); err != nil {
+	taken, err := t.existingKeys(candidates)
+	if err != nil {
 		return err
 	}
 
-	t.Rows = append(t.Rows, newRows...)
+	for _, row := range newRows {
+		for _, idx := range uniqueColumns {
+			value := row[idx]
+			if value == nil {
+				continue // multiple NULLs are allowed in a UNIQUE column
+			}
+			if taken[idx][value] {
+				return fmt.Errorf("duplicate entry %v for column %q", value, t.Columns[idx].Name)
+			}
+			taken[idx][value] = true
+		}
+	}
 	return nil
+}
+
+// existingKeys streams the table's file once and returns, per unique column,
+// which of the candidate values some existing row already holds.
+func (t *SqlTable) existingKeys(candidates map[int]map[any]bool) (map[int]map[any]bool, error) {
+	if t.file == nil {
+		return nil, fmt.Errorf("table %q is closed", t.Name)
+	}
+
+	found := make(map[int]map[any]bool, len(candidates))
+	for idx := range candidates {
+		found[idx] = make(map[any]bool)
+	}
+	for fileRow, err := range t.file.Scan() {
+		if err != nil {
+			return nil, err
+		}
+		row, err := DecodeRow(t.Columns, fileRow.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		for idx, wanted := range candidates {
+			if v := row[idx]; v != nil && wanted[v] {
+				found[idx][v] = true
+			}
+		}
+	}
+	return found, nil
 }
 
 // appendToFile writes rows to the table's file with a single fsync. Every
@@ -275,40 +335,60 @@ func (t *SqlTable) appendToFile(rows [][]any) error {
 func encodeRows(columns []parser.ColumnDefinition, rows [][]any) ([][]byte, error) {
 	encoded := make([][]byte, len(rows))
 	for i, row := range rows {
-		b, err := EncodeRow(columns, row)
+		b, err := encodeRowChecked(columns, row)
 		if err != nil {
 			return nil, err
-		}
-		if len(b) > storage.MaxRowSize {
-			return nil, fmt.Errorf("row too large: %d bytes exceeds the %d-byte limit", len(b), storage.MaxRowSize)
 		}
 		encoded[i] = b
 	}
 	return encoded, nil
 }
 
-// newFileHolding builds a complete replacement for the table's file: a new
-// file in the table's database directory holding rows encoded with columns,
-// fsynced. Nothing about the table changes. Every row is encoded and
-// size-checked before the file is created, and on any later failure the
-// partial file is removed, so a failed call leaves the directory as it was.
-// Callers hold t.mu.
-func (t *SqlTable) newFileHolding(columns []parser.ColumnDefinition, rows [][]any) (string, storage.File, error) {
+// encodeRowChecked encodes one row and rejects it if it cannot fit on a page.
+func encodeRowChecked(columns []parser.ColumnDefinition, row []any) ([]byte, error) {
+	b, err := EncodeRow(columns, row)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > storage.MaxRowSize {
+		return nil, fmt.Errorf("row too large: %d bytes exceeds the %d-byte limit", len(b), storage.MaxRowSize)
+	}
+	return b, nil
+}
+
+// rebuildFile builds a replacement for the table's file: a new file in the
+// table's database directory holding every live row of the current file, each
+// passed through transform and encoded with columns, then fsynced. Rows are
+// streamed one at a time, so memory does not grow with the table. Nothing
+// about the table changes, and on any failure the partial file is removed.
+// Callers hold t.mu, and t.Columns must still be the schema of the current
+// file, which is what its rows are decoded with.
+func (t *SqlTable) rebuildFile(columns []parser.ColumnDefinition, transform func(row []any) []any) (string, storage.File, error) {
 	if t.file == nil {
 		return "", nil, fmt.Errorf("table %q is closed", t.Name)
-	}
-
-	encoded, err := encodeRows(columns, rows)
-	if err != nil {
-		return "", nil, err
 	}
 
 	path, file, err := createTableFile(t.files, t.database)
 	if err != nil {
 		return "", nil, err
 	}
-	for _, b := range encoded {
-		if _, err := file.Insert(b); err != nil {
+
+	for fileRow, err := range t.file.Scan() {
+		if err != nil {
+			discardFile(path, file)
+			return "", nil, err
+		}
+		row, err := DecodeRow(t.Columns, fileRow.Bytes)
+		if err != nil {
+			discardFile(path, file)
+			return "", nil, err
+		}
+		encoded, err := encodeRowChecked(columns, transform(row))
+		if err != nil {
+			discardFile(path, file)
+			return "", nil, err
+		}
+		if _, err := file.Insert(encoded); err != nil {
 			discardFile(path, file)
 			return "", nil, err
 		}
@@ -320,8 +400,28 @@ func (t *SqlTable) newFileHolding(columns []parser.ColumnDefinition, rows [][]an
 	return path, file, nil
 }
 
+// countRows counts the live rows of the table's file, stopping once it has
+// seen limit of them.
+func (t *SqlTable) countRows(limit int) (int, error) {
+	if t.file == nil {
+		return 0, fmt.Errorf("table %q is closed", t.Name)
+	}
+
+	n := 0
+	for _, err := range t.file.Scan() {
+		if err != nil {
+			return 0, err
+		}
+		n++
+		if n >= limit {
+			break
+		}
+	}
+	return n, nil
+}
+
 // adoptFile makes file the table's file and deletes the old one. Callers have
-// already committed the new Columns and Rows and hold t.mu: if the old file
+// already committed the new Columns and hold t.mu: if the old file
 // cannot be removed the change is still applied and the old file is a
 // harmless orphan, so the error says so.
 func (t *SqlTable) adoptFile(path string, file storage.File) error {
@@ -425,8 +525,9 @@ func (t *SqlTable) AlterColumns(action parser.AlterAction) error {
 }
 
 // addColumn appends column to the schema and backfills every existing
-// row with its value. Reuses the exact same coercion/uniqueness rules
-// InsertValues already enforces: a NOT NULL column with no default, or a
+// row with its value, streaming the file into a replacement in the new
+// layout. Reuses the exact same coercion/uniqueness rules InsertValues
+// already enforces: a NOT NULL column with no default, or a
 // PRIMARY KEY/UNIQUE column with a default backfilled onto 2+ rows,
 // fails via the same checks INSERT uses — no new special-casing needed.
 func (t *SqlTable) addColumn(column parser.ColumnDefinition) error {
@@ -445,36 +546,35 @@ func (t *SqlTable) addColumn(column parser.ColumnDefinition) error {
 		return fmt.Errorf("field %q doesn't have a default value", column.Name)
 	}
 
-	checkUnique := column.IsPrimaryKey() || column.IsUnique()
-	seen := make(map[any]bool, len(t.Rows))
-
-	newRows := make([][]any, len(t.Rows))
-	for i, row := range t.Rows {
-		if checkUnique && filler != nil {
-			if seen[filler] {
-				return fmt.Errorf("duplicate entry %v for column %q", filler, column.Name)
-			}
-			seen[filler] = true
+	// One value backfilled onto two or more rows would hold the same key twice.
+	if (column.IsPrimaryKey() || column.IsUnique()) && filler != nil {
+		rows, err := t.countRows(2)
+		if err != nil {
+			return err
 		}
-		newRows[i] = append(append([]any{}, row...), filler)
+		if rows >= 2 {
+			return fmt.Errorf("duplicate entry %v for column %q", filler, column.Name)
+		}
 	}
 
 	// Build the replacement file before touching the table, so a failure
 	// (a row that no longer fits on a page, an I/O error) changes nothing.
 	newColumns := append(append([]parser.ColumnDefinition{}, t.Columns...), column)
-	path, file, err := t.newFileHolding(newColumns, newRows)
+	path, file, err := t.rebuildFile(newColumns, func(row []any) []any {
+		return append(row, filler)
+	})
 	if err != nil {
 		return err
 	}
 
 	t.Columns = newColumns
-	t.Rows = newRows
 	return t.adoptFile(path, file)
 }
 
-// dropColumn removes column at its schema index from both Columns and
-// every row in Rows — the two must stay aligned, or every subsequent
-// read of a row would be reading the wrong column's value.
+// dropColumn removes column at its schema index by streaming the file
+// into a replacement without that column's value in any row — the schema
+// and every stored row must stay aligned, or every subsequent read of a
+// row would be reading the wrong column's value.
 func (t *SqlTable) dropColumn(name string) error {
 	idx := -1
 	for i, col := range t.Columns {
@@ -491,22 +591,18 @@ func (t *SqlTable) dropColumn(name string) error {
 	}
 
 	newColumns := append(append([]parser.ColumnDefinition{}, t.Columns[:idx]...), t.Columns[idx+1:]...)
-	newRows := make([][]any, len(t.Rows))
-	for i, row := range t.Rows {
-		newRows[i] = append(append([]any{}, row[:idx]...), row[idx+1:]...)
-	}
-
-	path, file, err := t.newFileHolding(newColumns, newRows)
+	path, file, err := t.rebuildFile(newColumns, func(row []any) []any {
+		return append(row[:idx:idx], row[idx+1:]...)
+	})
 	if err != nil {
 		return err
 	}
 
 	t.Columns = newColumns
-	t.Rows = newRows
 	return t.adoptFile(path, file)
 }
 
-// renameColumn doesn't touch Rows — rows are positional, not keyed by
+// renameColumn doesn't touch the file — rows are positional, not keyed by
 // name, so a rename is purely a schema-metadata change.
 func (t *SqlTable) renameColumn(oldName, newName string) error {
 	idx := -1
@@ -531,10 +627,8 @@ func (t *SqlTable) renameColumn(oldName, newName string) error {
 }
 
 // Delete removes every row matching where (a nil where matches every row,
-// so a bare DELETE FROM wipes the table). Rows are collected into a fresh
-// buffer of survivors and only committed via one final assignment, so an
-// error partway through (e.g. an unknown column in where) leaves t.Rows
-// completely untouched rather than partially compacted.
+// so a bare DELETE FROM wipes the table) by tombstoning it in the table's
+// file; see deleteFromFile.
 func (t *SqlTable) Delete(where parser.Expression) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -544,25 +638,7 @@ func (t *SqlTable) Delete(where parser.Expression) error {
 		columnIndex[col.Name] = i
 	}
 
-	kept := make([][]any, 0, len(t.Rows))
-	for _, row := range t.Rows {
-		matched, err := evalWhere(where, row, columnIndex, t.Columns)
-		if err != nil {
-			return err
-		}
-		if !matched {
-			kept = append(kept, row)
-		}
-	}
-
-	// Mirror the delete onto the table's file before committing it to Rows,
-	// so a failed write leaves Rows untouched.
-	if err := t.deleteFromFile(where, columnIndex); err != nil {
-		return err
-	}
-
-	t.Rows = kept
-	return nil
+	return t.deleteFromFile(where, columnIndex)
 }
 
 // deleteFromFile tombstones every live row of the table's file that matches
@@ -570,10 +646,7 @@ func (t *SqlTable) Delete(where parser.Expression) error {
 // tombstone is written, so an evaluation error touches nothing, and a row is
 // never tombstoned while the scan is still reading its page; only an I/O error
 // can leave the delete partly applied, and the engine has no WAL to undo that.
-// The matches come from the file's own rows, not from Rows: the two can drift
-// until every statement is migrated, and a row that exists in only one of them
-// is simply not a match in the other. Callers hold t.mu, and have already
-// evaluated where against Rows, so an invalid where was reported there first.
+// Callers hold t.mu.
 func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[string]int) error {
 	if t.file == nil {
 		return fmt.Errorf("table %q is closed", t.Name)
@@ -618,9 +691,14 @@ type resolvedAssignment struct {
 // matches every row, same as Delete), enforcing PRIMARY KEY/UNIQUE on any
 // assigned column. NOT NULL is a non-issue here: the parser only accepts a
 // STRING or NUMBER literal on the right of SET, so an assignment can never
-// produce NULL. Rows are built into a fresh buffer and only committed via
-// one final assignment, so a failure partway through (e.g. a coercion
-// error or a uniqueness violation) leaves the table completely untouched.
+// produce NULL. The table's file is scanned once: it finds the matching rows
+// and, for the uniqueness checks, whether any row that is not being updated
+// already holds an assigned value. Every new version is encoded and
+// size-checked before anything is written, and the new versions are inserted
+// before the old ones are tombstoned, so a failure partway through (a
+// coercion error, a uniqueness violation, a row too large for a page) leaves
+// the table untouched, and a crash between the two writes can duplicate a row
+// but never lose one.
 func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expression) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -643,124 +721,75 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 		resolved[i] = resolvedAssignment{index: idx, value: coerced}
 	}
 
-	// Determine which rows match, once, so the uniqueness seed below can
-	// be built from exactly the rows that are staying unchanged.
-	matched := make([]bool, len(t.Rows))
-	for i, row := range t.Rows {
-		m, err := evalWhere(where, row, columnIndex, t.Columns)
-		if err != nil {
-			return err
-		}
-		matched[i] = m
+	if t.file == nil {
+		return fmt.Errorf("table %q is closed", t.Name)
 	}
 
-	// Seed a uniqueness set per PRIMARY KEY/UNIQUE column touched by an
-	// assignment, from every row NOT being updated — those values stay
-	// occupied. A matched row's own old value is deliberately excluded, so
-	// re-assigning a column back to its current value never self-conflicts.
+	// The PRIMARY KEY/UNIQUE columns being assigned, in assignment order. A
+	// SET column = literal is static, so every matched row gets the same value.
 	uniqueColumns := make([]int, 0)
+	assigned := make(map[int]any, len(resolved))
 	for _, a := range resolved {
+		assigned[a.index] = a.value
 		col := t.Columns[a.index]
 		if col.IsPrimaryKey() || col.IsUnique() {
 			uniqueColumns = append(uniqueColumns, a.index)
 		}
 	}
-	uniqueValues := make(map[int]map[any]bool, len(uniqueColumns))
-	for _, idx := range uniqueColumns {
-		set := make(map[any]bool, len(t.Rows))
-		for i, row := range t.Rows {
-			if matched[i] {
-				continue
-			}
-			if v := row[idx]; v != nil {
-				set[v] = true
-			}
-		}
-		uniqueValues[idx] = set
-	}
-
-	newRows := make([][]any, len(t.Rows))
-	for i, row := range t.Rows {
-		if !matched[i] {
-			newRows[i] = row
-			continue
-		}
-
-		updated := append([]any{}, row...)
-		for _, a := range resolved {
-			updated[a.index] = a.value
-		}
-
-		for _, idx := range uniqueColumns {
-			value := updated[idx]
-			if value == nil {
-				continue
-			}
-			if uniqueValues[idx][value] {
-				return fmt.Errorf("duplicate entry %v for column %q", value, t.Columns[idx].Name)
-			}
-			uniqueValues[idx][value] = true
-		}
-
-		newRows[i] = updated
-	}
-
-	// Mirror the update onto the table's file before committing it to Rows,
-	// so a failed write leaves Rows untouched.
-	if err := t.updateFile(resolved, where, columnIndex); err != nil {
-		return err
-	}
-
-	t.Rows = newRows
-	return nil
-}
-
-// updateFile writes the update to the table's file: every live row matching
-// where gets a new version, appended with the assignments applied, and its
-// old version is tombstoned, then one fsync. The matching rows are collected
-// and every new version is encoded and size-checked before the first write,
-// so a bad update writes nothing; only an I/O error can leave it partly
-// applied, and the engine has no WAL to undo that. The new versions are
-// inserted before the old ones are tombstoned, so a crash between the two can
-// duplicate a row but never lose one. The matches come from the file's own
-// rows, not from Rows, which can drift until every statement is migrated, and
-// uniqueness is not re-checked here: Rows already did. Callers hold t.mu and
-// have already evaluated where and the assignments against Rows, so an
-// invalid statement was reported there first.
-func (t *SqlTable) updateFile(assignments []resolvedAssignment, where parser.Expression, columnIndex map[string]int) error {
-	if t.file == nil {
-		return fmt.Errorf("table %q is closed", t.Name)
-	}
 
 	var oldIDs []storage.RowID
 	var updated [][]any
-	for row, err := range t.file.Scan() {
+	// A unique column is in conflict when a row that is NOT being updated
+	// already holds the assigned value. A matched row's own old value is
+	// deliberately excluded, so re-assigning a column back to its current
+	// value never self-conflicts.
+	conflicts := make(map[int]bool, len(uniqueColumns))
+	for fileRow, err := range t.file.Scan() {
 		if err != nil {
 			return err
 		}
-		decoded, err := DecodeRow(t.Columns, row.Bytes)
+		row, err := DecodeRow(t.Columns, fileRow.Bytes)
 		if err != nil {
 			return err
 		}
-		isMatch, err := evalWhere(where, decoded, columnIndex, t.Columns)
+		matched, err := evalWhere(where, row, columnIndex, t.Columns)
 		if err != nil {
 			return err
 		}
-		if !isMatch {
+		if !matched {
+			for _, idx := range uniqueColumns {
+				if row[idx] != nil && row[idx] == assigned[idx] {
+					conflicts[idx] = true
+				}
+			}
 			continue
 		}
-		for _, a := range assignments {
-			decoded[a.index] = a.value
+		oldIDs = append(oldIDs, fileRow.ID)
+		for _, a := range resolved {
+			row[a.index] = a.value
 		}
-		oldIDs = append(oldIDs, row.ID)
-		updated = append(updated, decoded)
+		updated = append(updated, row)
+	}
+
+	if len(updated) > 0 {
+		for _, idx := range uniqueColumns {
+			if conflicts[idx] {
+				return fmt.Errorf("duplicate entry %v for column %q", assigned[idx], t.Columns[idx].Name)
+			}
+		}
+		// Two matched rows would both receive the assigned value; the old
+		// row-by-row check hit that on the second row, on the first unique
+		// column in assignment order.
+		if len(updated) > 1 && len(uniqueColumns) > 0 {
+			idx := uniqueColumns[0]
+			return fmt.Errorf("duplicate entry %v for column %q", assigned[idx], t.Columns[idx].Name)
+		}
 	}
 
 	encoded, err := encodeRows(t.Columns, updated)
 	if err != nil {
 		return err
 	}
-
 	for _, b := range encoded {
 		if _, err := t.file.Insert(b); err != nil {
 			return err
