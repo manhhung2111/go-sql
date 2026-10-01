@@ -19,6 +19,7 @@ var WireSet = wire.NewSet(
 	parser.WireSet,
 	grpcserver.WireSet,
 	engine.WireSet,
+	ProvideDataDir,
 )
 
 func InitializeServer(cfg *config.Config) (*grpcserver.Server, error) {

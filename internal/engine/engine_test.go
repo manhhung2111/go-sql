@@ -12,7 +12,7 @@ import (
 const testDatabase = "test"
 
 func TestEngine_CreateDatabase(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	resp, err := e.Execute(parser.CreateDatabaseStatement{Database: "testdb"}, testDatabase)
 
@@ -21,7 +21,7 @@ func TestEngine_CreateDatabase(t *testing.T) {
 }
 
 func TestEngine_CreateDatabase_AlreadyExists(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase("testdb"))
 	e := NewEngine(catalog)
 
@@ -31,7 +31,7 @@ func TestEngine_CreateDatabase_AlreadyExists(t *testing.T) {
 }
 
 func TestEngine_DropDatabase(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase("testdb"))
 	e := NewEngine(catalog)
 
@@ -42,7 +42,7 @@ func TestEngine_DropDatabase(t *testing.T) {
 }
 
 func TestEngine_DropDatabase_DoesNotExist(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.DropDatabaseStatement{Database: "testdb"}, testDatabase)
 
@@ -50,7 +50,7 @@ func TestEngine_DropDatabase_DoesNotExist(t *testing.T) {
 }
 
 func TestEngine_ShowDatabases(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase("zebra"))
 	require.NoError(t, catalog.CreateDatabase("apple"))
 	e := NewEngine(catalog)
@@ -63,7 +63,7 @@ func TestEngine_ShowDatabases(t *testing.T) {
 }
 
 func TestEngine_ShowDatabases_Empty(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	resp, err := e.Execute(parser.ShowDatabasesStatement{}, testDatabase)
 
@@ -79,7 +79,7 @@ func TestEngine_ShowDatabases_Empty(t *testing.T) {
 type unsupportedStatement struct{}
 
 func TestEngine_UnsupportedStatement(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(unsupportedStatement{}, testDatabase)
 
@@ -87,7 +87,7 @@ func TestEngine_UnsupportedStatement(t *testing.T) {
 }
 
 func TestEngine_CreateTable(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 
@@ -99,7 +99,7 @@ func TestEngine_CreateTable(t *testing.T) {
 }
 
 func TestEngine_CreateTable_NoDatabaseSelected(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.CreateTableStatement{Table: "users"}, "")
 
@@ -107,7 +107,7 @@ func TestEngine_CreateTable_NoDatabaseSelected(t *testing.T) {
 }
 
 func TestEngine_CreateTable_DatabaseDoesNotExist(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.CreateTableStatement{Table: "users"}, testDatabase)
 
@@ -115,7 +115,7 @@ func TestEngine_CreateTable_DatabaseDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_CreateTable_AlreadyExists(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 
@@ -128,7 +128,7 @@ func TestEngine_CreateTable_AlreadyExists(t *testing.T) {
 }
 
 func TestEngine_CreateTable_IfNotExists(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 
@@ -142,7 +142,7 @@ func TestEngine_CreateTable_IfNotExists(t *testing.T) {
 }
 
 func TestEngine_InsertInto(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 
@@ -163,7 +163,7 @@ func TestEngine_InsertInto(t *testing.T) {
 }
 
 func TestEngine_InsertInto_NoDatabaseSelected(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.InsertIntoStatement{Table: "users"}, "")
 
@@ -171,7 +171,7 @@ func TestEngine_InsertInto_NoDatabaseSelected(t *testing.T) {
 }
 
 func TestEngine_InsertInto_DatabaseDoesNotExist(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.InsertIntoStatement{Table: "users"}, testDatabase)
 
@@ -179,7 +179,7 @@ func TestEngine_InsertInto_DatabaseDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_InsertInto_TableDoesNotExist(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 
@@ -196,7 +196,7 @@ func newTestTable(t *testing.T, e Engine) {
 }
 
 func TestEngine_AlterTable_AddColumn(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 	newTestTable(t, e)
@@ -211,7 +211,7 @@ func TestEngine_AlterTable_AddColumn(t *testing.T) {
 }
 
 func TestEngine_AlterTable_DropColumn(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 	_, err := e.Execute(parser.CreateTableStatement{Table: "users", Columns: []parser.ColumnDefinition{
@@ -230,7 +230,7 @@ func TestEngine_AlterTable_DropColumn(t *testing.T) {
 }
 
 func TestEngine_AlterTable_RenameColumn(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 	newTestTable(t, e)
@@ -245,7 +245,7 @@ func TestEngine_AlterTable_RenameColumn(t *testing.T) {
 }
 
 func TestEngine_AlterTable_RenameTable(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 	newTestTable(t, e)
@@ -265,7 +265,7 @@ func TestEngine_AlterTable_RenameTable(t *testing.T) {
 }
 
 func TestEngine_AlterTable_NoDatabaseSelected(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.AlterTableStatement{Table: "users", Action: parser.RenameTableAction{NewName: "people"}}, "")
 
@@ -273,7 +273,7 @@ func TestEngine_AlterTable_NoDatabaseSelected(t *testing.T) {
 }
 
 func TestEngine_AlterTable_DatabaseDoesNotExist(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.AlterTableStatement{
 		Table:  "users",
@@ -284,7 +284,7 @@ func TestEngine_AlterTable_DatabaseDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_AlterTable_TableDoesNotExist(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 
@@ -297,7 +297,7 @@ func TestEngine_AlterTable_TableDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_DropTable(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 	newTestTable(t, e)
@@ -314,7 +314,7 @@ func TestEngine_DropTable(t *testing.T) {
 }
 
 func TestEngine_DropTable_NoDatabaseSelected(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.DropTableStatement{Table: "users"}, "")
 
@@ -322,7 +322,7 @@ func TestEngine_DropTable_NoDatabaseSelected(t *testing.T) {
 }
 
 func TestEngine_DropTable_DatabaseDoesNotExist(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.DropTableStatement{Table: "users"}, testDatabase)
 
@@ -330,7 +330,7 @@ func TestEngine_DropTable_DatabaseDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_DropTable_TableDoesNotExist(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 
@@ -340,7 +340,7 @@ func TestEngine_DropTable_TableDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_Select(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 	newTestTable(t, e)
@@ -359,7 +359,7 @@ func TestEngine_Select(t *testing.T) {
 }
 
 func TestEngine_Select_NoDatabaseSelected(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.SelectStatement{Table: "users", Columns: []string{"*"}}, "")
 
@@ -367,7 +367,7 @@ func TestEngine_Select_NoDatabaseSelected(t *testing.T) {
 }
 
 func TestEngine_Select_DatabaseDoesNotExist(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.SelectStatement{Table: "users", Columns: []string{"*"}}, testDatabase)
 
@@ -375,7 +375,7 @@ func TestEngine_Select_DatabaseDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_Select_TableDoesNotExist(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 
@@ -385,7 +385,7 @@ func TestEngine_Select_TableDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_Delete(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 	newTestTable(t, e)
@@ -407,7 +407,7 @@ func TestEngine_Delete(t *testing.T) {
 }
 
 func TestEngine_Delete_NoDatabaseSelected(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.DeleteStatement{Table: "users"}, "")
 
@@ -415,7 +415,7 @@ func TestEngine_Delete_NoDatabaseSelected(t *testing.T) {
 }
 
 func TestEngine_Delete_DatabaseDoesNotExist(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.DeleteStatement{Table: "users"}, testDatabase)
 
@@ -423,7 +423,7 @@ func TestEngine_Delete_DatabaseDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_Delete_TableDoesNotExist(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 
@@ -433,7 +433,7 @@ func TestEngine_Delete_TableDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_Update(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 	newTestTable(t, e)
@@ -458,7 +458,7 @@ func TestEngine_Update(t *testing.T) {
 }
 
 func TestEngine_Update_NoDatabaseSelected(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.UpdateStatement{Table: "users"}, "")
 
@@ -466,7 +466,7 @@ func TestEngine_Update_NoDatabaseSelected(t *testing.T) {
 }
 
 func TestEngine_Update_DatabaseDoesNotExist(t *testing.T) {
-	e := NewEngine(NewCatalog())
+	e := NewEngine(newTestCatalog(t))
 
 	_, err := e.Execute(parser.UpdateStatement{Table: "users"}, testDatabase)
 
@@ -474,7 +474,7 @@ func TestEngine_Update_DatabaseDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_Update_TableDoesNotExist(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 
@@ -484,7 +484,7 @@ func TestEngine_Update_TableDoesNotExist(t *testing.T) {
 }
 
 func TestEngine_DropTable_IfExists(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase(testDatabase))
 	e := NewEngine(catalog)
 

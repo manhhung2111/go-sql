@@ -10,7 +10,7 @@ import (
 )
 
 func TestDatabase_CreateTable(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 	columns := []parser.ColumnDefinition{{Name: "id", DataType: parser.IntDataType{}}}
 
 	err := db.CreateTable("users", columns, false)
@@ -22,7 +22,7 @@ func TestDatabase_CreateTable(t *testing.T) {
 }
 
 func TestDatabase_CreateTable_AlreadyExists(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 	require.NoError(t, db.CreateTable("users", nil, false))
 
 	err := db.CreateTable("users", nil, false)
@@ -31,7 +31,7 @@ func TestDatabase_CreateTable_AlreadyExists(t *testing.T) {
 }
 
 func TestDatabase_CreateTable_IfNotExists_NewTable(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 	columns := []parser.ColumnDefinition{{Name: "id", DataType: parser.IntDataType{}}}
 
 	err := db.CreateTable("users", columns, true)
@@ -43,7 +43,7 @@ func TestDatabase_CreateTable_IfNotExists_NewTable(t *testing.T) {
 }
 
 func TestDatabase_CreateTable_IfNotExists_PreservesExistingSchema(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 	original := []parser.ColumnDefinition{{Name: "id", DataType: parser.IntDataType{}}}
 	require.NoError(t, db.CreateTable("users", original, false))
 
@@ -57,7 +57,7 @@ func TestDatabase_CreateTable_IfNotExists_PreservesExistingSchema(t *testing.T) 
 }
 
 func TestDatabase_GetTable_NotFound(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 
 	_, exists := db.GetTable("users")
 
@@ -65,7 +65,7 @@ func TestDatabase_GetTable_NotFound(t *testing.T) {
 }
 
 func TestDatabase_RenameTable(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 	columns := []parser.ColumnDefinition{{Name: "id", DataType: parser.IntDataType{}}}
 	require.NoError(t, db.CreateTable("users", columns, false))
 
@@ -82,7 +82,7 @@ func TestDatabase_RenameTable(t *testing.T) {
 }
 
 func TestDatabase_RenameTable_OldNameMissing(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 
 	err := db.RenameTable("users", "people")
 
@@ -90,7 +90,7 @@ func TestDatabase_RenameTable_OldNameMissing(t *testing.T) {
 }
 
 func TestDatabase_RenameTable_NewNameCollides(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 	require.NoError(t, db.CreateTable("users", nil, false))
 	require.NoError(t, db.CreateTable("people", nil, false))
 
@@ -100,7 +100,7 @@ func TestDatabase_RenameTable_NewNameCollides(t *testing.T) {
 }
 
 func TestDatabase_DropTable(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 	require.NoError(t, db.CreateTable("users", nil, false))
 
 	err := db.DropTable("users", false)
@@ -111,7 +111,7 @@ func TestDatabase_DropTable(t *testing.T) {
 }
 
 func TestDatabase_DropTable_DoesNotExist(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 
 	err := db.DropTable("users", false)
 
@@ -119,7 +119,7 @@ func TestDatabase_DropTable_DoesNotExist(t *testing.T) {
 }
 
 func TestDatabase_DropTable_IfExists(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 
 	err := db.DropTable("users", true)
 
@@ -127,7 +127,7 @@ func TestDatabase_DropTable_IfExists(t *testing.T) {
 }
 
 func TestDatabase_ConcurrentCreateTable(t *testing.T) {
-	db := NewDatabase("testdb")
+	db := newTestDatabase(t)
 	const n = 50
 
 	done := make(chan struct{})

@@ -24,7 +24,10 @@ func newTestClient(t *testing.T) sqlpb.SqlParserServiceClient {
 	t.Cleanup(func() { lis.Close() })
 
 	sqlParser := parser.NewParser(parser.NewLexer())
-	sqlEngine := engine.NewEngine(engine.NewCatalog())
+	catalog, err := engine.NewCatalog(engine.DataDir(t.TempDir()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = catalog.Close() })
+	sqlEngine := engine.NewEngine(catalog)
 
 	grpcServer := grpc.NewServer()
 	sqlpb.RegisterSqlParserServiceServer(grpcServer, NewServer(&config.Config{}, sqlParser, sqlEngine))

@@ -1,8 +1,12 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"manhhung2111/go-sql/internal/parser"
+	"manhhung2111/go-sql/internal/storage"
+	"os"
 	"sync"
 )
 
@@ -13,6 +17,10 @@ type Table interface {
 	Delete(where parser.Expression) error
 	Update(assignments []parser.Assignment, where parser.Expression) error
 	Rename(name string)
+	// Close releases the table's file. It is idempotent.
+	Close() error
+	// Drop closes the table's file and deletes it. It is idempotent.
+	Drop() error
 }
 
 type SqlTable struct {
@@ -20,6 +28,12 @@ type SqlTable struct {
 	Name    string
 	Columns []parser.ColumnDefinition
 	Rows    [][]any
+
+	// path and file are the table's heap file. Statements still run against
+	// Rows; the file exists now so that creating, dropping and numbering
+	// files is settled before the data moves onto it.
+	path string
+	file storage.File
 }
 
 // Rules when for a table schema:
@@ -27,7 +41,11 @@ type SqlTable struct {
 //   - There is only 1 primary key column in a table, and the table can have multiple columns with constrants (NOT NULL & UNIQUE)
 //   - Columns do not specify with contraint NOT NULL will default be NULLABLE
 //   - A table can not have duplicated columns
-func NewTable(name string, columns []parser.ColumnDefinition) (*SqlTable, error) {
+//
+// The schema is validated before the file at path is created, so a rejected
+// schema never leaves a file behind. Creating the file fails if path already
+// exists.
+func NewTable(name string, columns []parser.ColumnDefinition, path string) (*SqlTable, error) {
 	validated := make([]parser.ColumnDefinition, 0, len(columns))
 	for _, column := range columns {
 		if err := validateNewColumn(name, validated, column); err != nil {
@@ -36,7 +54,12 @@ func NewTable(name string, columns []parser.ColumnDefinition) (*SqlTable, error)
 		validated = append(validated, column)
 	}
 
-	return &SqlTable{Name: name, Columns: columns, Rows: make([][]any, 0)}, nil
+	file, err := storage.CreateFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SqlTable{Name: name, Columns: columns, Rows: make([][]any, 0), path: path, file: file}, nil
 }
 
 // validateNewColumn checks column against a table's existing columns for
@@ -493,4 +516,30 @@ func (t *SqlTable) Rename(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.Name = name
+}
+
+func (t *SqlTable) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closeLocked()
+}
+
+func (t *SqlTable) closeLocked() error {
+	if t.file == nil {
+		return nil
+	}
+	err := t.file.Close()
+	t.file = nil
+	return err
+}
+
+func (t *SqlTable) Drop() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	closeErr := t.closeLocked()
+	if err := os.Remove(t.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return errors.Join(closeErr, fmt.Errorf("removing table file %q: %w", t.path, err))
+	}
+	return closeErr
 }
