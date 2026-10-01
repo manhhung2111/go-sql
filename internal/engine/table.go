@@ -29,11 +29,16 @@ type SqlTable struct {
 	Columns []parser.ColumnDefinition
 	Rows    [][]any
 
-	// path and file are the table's heap file. Statements still run against
-	// Rows; the file exists now so that creating, dropping and numbering
-	// files is settled before the data moves onto it.
+	// path and file are the table's heap file. INSERT and ALTER ADD/DROP
+	// COLUMN keep it a copy of Rows; the other statements and every read
+	// still use Rows alone until they are migrated.
 	path string
 	file storage.File
+
+	// files and database let the table allocate a replacement file when a
+	// schema change rewrites its rows.
+	files    *fileAllocator
+	database string
 }
 
 // Rules when for a table schema:
@@ -42,10 +47,10 @@ type SqlTable struct {
 //   - Columns do not specify with contraint NOT NULL will default be NULLABLE
 //   - A table can not have duplicated columns
 //
-// The schema is validated before the file at path is created, so a rejected
-// schema never leaves a file behind. Creating the file fails if path already
-// exists.
-func NewTable(name string, columns []parser.ColumnDefinition, path string) (*SqlTable, error) {
+// The schema is validated before anything is created on disk, so a rejected
+// schema never leaves a file or directory behind. The table's file is a new,
+// empty file in database's directory.
+func NewTable(name string, columns []parser.ColumnDefinition, files *fileAllocator, database string) (*SqlTable, error) {
 	validated := make([]parser.ColumnDefinition, 0, len(columns))
 	for _, column := range columns {
 		if err := validateNewColumn(name, validated, column); err != nil {
@@ -54,12 +59,33 @@ func NewTable(name string, columns []parser.ColumnDefinition, path string) (*Sql
 		validated = append(validated, column)
 	}
 
-	file, err := storage.CreateFile(path)
+	path, file, err := createTableFile(files, database)
 	if err != nil {
 		return nil, err
 	}
 
-	return &SqlTable{Name: name, Columns: columns, Rows: make([][]any, 0), path: path, file: file}, nil
+	return &SqlTable{
+		Name: name, Columns: columns, Rows: make([][]any, 0),
+		path: path, file: file, files: files, database: database,
+	}, nil
+}
+
+// createTableFile makes a new, empty table file in database's directory,
+// creating the directory first if it is missing: names that differ only by
+// case share one directory on a case-insensitive filesystem, so dropping one
+// can remove a directory another database still uses. The file is created
+// exclusively, so it can never adopt an old file's rows.
+func createTableFile(files *fileAllocator, database string) (string, storage.File, error) {
+	if err := os.MkdirAll(files.databaseDir(database), 0o755); err != nil {
+		return "", nil, fmt.Errorf("creating directory for database %q: %w", database, err)
+	}
+
+	path := files.newTablePath(database)
+	file, err := storage.CreateFile(path)
+	if err != nil {
+		return "", nil, err
+	}
+	return path, file, nil
 }
 
 // validateNewColumn checks column against a table's existing columns for
@@ -231,16 +257,9 @@ func (t *SqlTable) appendToFile(rows [][]any) error {
 		return fmt.Errorf("table %q is closed", t.Name)
 	}
 
-	encoded := make([][]byte, len(rows))
-	for i, row := range rows {
-		b, err := EncodeRow(t.Columns, row)
-		if err != nil {
-			return err
-		}
-		if len(b) > storage.MaxRowSize {
-			return fmt.Errorf("row too large: %d bytes exceeds the %d-byte limit", len(b), storage.MaxRowSize)
-		}
-		encoded[i] = b
+	encoded, err := encodeRows(t.Columns, rows)
+	if err != nil {
+		return err
 	}
 
 	for _, b := range encoded {
@@ -249,6 +268,78 @@ func (t *SqlTable) appendToFile(rows [][]any) error {
 		}
 	}
 	return t.file.Sync()
+}
+
+// encodeRows encodes every row with columns and rejects any that cannot fit
+// on a page, before the caller writes anything.
+func encodeRows(columns []parser.ColumnDefinition, rows [][]any) ([][]byte, error) {
+	encoded := make([][]byte, len(rows))
+	for i, row := range rows {
+		b, err := EncodeRow(columns, row)
+		if err != nil {
+			return nil, err
+		}
+		if len(b) > storage.MaxRowSize {
+			return nil, fmt.Errorf("row too large: %d bytes exceeds the %d-byte limit", len(b), storage.MaxRowSize)
+		}
+		encoded[i] = b
+	}
+	return encoded, nil
+}
+
+// newFileHolding builds a complete replacement for the table's file: a new
+// file in the table's database directory holding rows encoded with columns,
+// fsynced. Nothing about the table changes. Every row is encoded and
+// size-checked before the file is created, and on any later failure the
+// partial file is removed, so a failed call leaves the directory as it was.
+// Callers hold t.mu.
+func (t *SqlTable) newFileHolding(columns []parser.ColumnDefinition, rows [][]any) (string, storage.File, error) {
+	if t.file == nil {
+		return "", nil, fmt.Errorf("table %q is closed", t.Name)
+	}
+
+	encoded, err := encodeRows(columns, rows)
+	if err != nil {
+		return "", nil, err
+	}
+
+	path, file, err := createTableFile(t.files, t.database)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, b := range encoded {
+		if _, err := file.Insert(b); err != nil {
+			discardFile(path, file)
+			return "", nil, err
+		}
+	}
+	if err := file.Sync(); err != nil {
+		discardFile(path, file)
+		return "", nil, err
+	}
+	return path, file, nil
+}
+
+// adoptFile makes file the table's file and deletes the old one. Callers have
+// already committed the new Columns and Rows and hold t.mu: if the old file
+// cannot be removed the change is still applied and the old file is a
+// harmless orphan, so the error says so.
+func (t *SqlTable) adoptFile(path string, file storage.File) error {
+	oldPath := t.path
+	closeErr := t.closeLocked()
+
+	t.file, t.path = file, path
+
+	if err := os.Remove(oldPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return errors.Join(closeErr, fmt.Errorf("column change applied, but removing the old table file %q failed: %w", oldPath, err))
+	}
+	return closeErr
+}
+
+// discardFile closes and deletes a file that was never adopted.
+func discardFile(path string, file storage.File) {
+	_ = file.Close()
+	_ = os.Remove(path)
 }
 
 // Select performs a full-table scan, keeping rows where matches (a nil
@@ -354,9 +445,17 @@ func (t *SqlTable) addColumn(column parser.ColumnDefinition) error {
 		newRows[i] = append(append([]any{}, row...), filler)
 	}
 
-	t.Columns = append(t.Columns, column)
+	// Build the replacement file before touching the table, so a failure
+	// (a row that no longer fits on a page, an I/O error) changes nothing.
+	newColumns := append(append([]parser.ColumnDefinition{}, t.Columns...), column)
+	path, file, err := t.newFileHolding(newColumns, newRows)
+	if err != nil {
+		return err
+	}
+
+	t.Columns = newColumns
 	t.Rows = newRows
-	return nil
+	return t.adoptFile(path, file)
 }
 
 // dropColumn removes column at its schema index from both Columns and
@@ -383,9 +482,14 @@ func (t *SqlTable) dropColumn(name string) error {
 		newRows[i] = append(append([]any{}, row[:idx]...), row[idx+1:]...)
 	}
 
+	path, file, err := t.newFileHolding(newColumns, newRows)
+	if err != nil {
+		return err
+	}
+
 	t.Columns = newColumns
 	t.Rows = newRows
-	return nil
+	return t.adoptFile(path, file)
 }
 
 // renameColumn doesn't touch Rows — rows are positional, not keyed by

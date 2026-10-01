@@ -270,3 +270,22 @@ func TestLifecycle_DroppingACaseTwinDoesNotBreakTheSurvivor(t *testing.T) {
 	_, exists := survivor.GetTable("users")
 	assert.True(t, exists)
 }
+
+// After an ALTER the table lives in a new file, so dropping it must remove
+// that file, not the path the table started with.
+func TestLifecycle_AlterThenDropRemovesTheCurrentFile(t *testing.T) {
+	dir := t.TempDir()
+	db := createDB(t, newTestCatalogAt(t, dir), "shop")
+	require.NoError(t, db.CreateTable("users", idColumn, false)) // 1.tbl
+	table, _ := db.GetTable("users")
+
+	require.NoError(t, table.AlterColumns(parser.AddColumnAction{
+		Column: parser.ColumnDefinition{Name: "age", DataType: parser.IntDataType{}},
+	}))
+
+	assert.Equal(t, []string{"2.tbl"}, tableFiles(t, dir, "shop"), "1.tbl was replaced by a fresh id, never reused")
+
+	require.NoError(t, db.DropTable("users", false))
+
+	assert.Empty(t, tableFiles(t, dir, "shop"))
+}

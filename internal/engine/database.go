@@ -73,14 +73,7 @@ func (d *SqlDatabase) CreateTable(name string, columns []parser.ColumnDefinition
 		return nil
 	}
 
-	// The directory can vanish while the database lives: names that differ
-	// only by case share one on a case-insensitive filesystem, and dropping
-	// either removes it. Re-create it before every new table file.
-	if err := os.MkdirAll(d.files.databaseDir(d.Name), 0o755); err != nil {
-		return fmt.Errorf("creating directory for database %q: %w", d.Name, err)
-	}
-
-	table, err := NewTable(name, columns, d.files.newTablePath(d.Name))
+	table, err := NewTable(name, columns, d.files, d.Name)
 	if err != nil {
 		return err
 	}
