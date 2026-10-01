@@ -225,3 +225,48 @@ func TestTable_DropRemovesItsFile(t *testing.T) {
 	_, statErr := os.Stat(table.path)
 	assert.True(t, os.IsNotExist(statErr))
 }
+
+// Two database names that differ only by case share one directory on a
+// case-insensitive filesystem, so dropping one can remove a directory the other
+// still uses. Removing the directory by hand reproduces that state portably.
+func TestLifecycle_CreateTableRecreatesAMissingDatabaseDirectory(t *testing.T) {
+	dir := t.TempDir()
+	db := createDB(t, newTestCatalogAt(t, dir), "shop")
+	require.NoError(t, os.RemoveAll(filepath.Join(dir, "data", "shop")))
+
+	require.NoError(t, db.CreateTable("users", idColumn, false))
+
+	assert.Equal(t, []string{"1.tbl"}, tableFiles(t, dir, "shop"))
+}
+
+// A handle fetched before DROP DATABASE must not be able to create tables in a
+// database that no longer exists: the table would be unreachable, and its file
+// descriptor and file would leak.
+func TestLifecycle_CreateTableOnADroppedDatabaseFails(t *testing.T) {
+	dir := t.TempDir()
+	c := newTestCatalogAt(t, dir)
+	db := createDB(t, c, "shop")
+	require.NoError(t, c.DropDatabase("shop"))
+
+	err := db.CreateTable("users", idColumn, false)
+
+	assert.EqualError(t, err, `database "shop" does not exist`)
+	_, statErr := os.Stat(filepath.Join(dir, "data", "shop"))
+	assert.True(t, os.IsNotExist(statErr), "nothing is created for a dropped database")
+}
+
+// The end-to-end form of the case-twin hazard. On a case-insensitive
+// filesystem "shop" and "SHOP" share one directory, so this really collides;
+// on a case-sensitive one they are separate and it passes trivially.
+func TestLifecycle_DroppingACaseTwinDoesNotBreakTheSurvivor(t *testing.T) {
+	dir := t.TempDir()
+	c := newTestCatalogAt(t, dir)
+	createDB(t, c, "shop")
+	survivor := createDB(t, c, "SHOP")
+	require.NoError(t, c.DropDatabase("shop"))
+
+	require.NoError(t, survivor.CreateTable("users", idColumn, false))
+
+	_, exists := survivor.GetTable("users")
+	assert.True(t, exists)
+}

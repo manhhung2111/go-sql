@@ -27,6 +27,8 @@ type SqlDatabase struct {
 	Name  string
 	Table map[string]Table
 	files *fileAllocator
+	// dropped is set by Drop; the database can no longer create tables.
+	dropped bool
 }
 
 // NewDatabase validates name (it becomes a directory name) and creates the
@@ -58,11 +60,24 @@ func (d *SqlDatabase) CreateTable(name string, columns []parser.ColumnDefinition
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	// A handle fetched before DROP DATABASE must not create tables: they
+	// would be unreachable, and their file and descriptor would leak.
+	if d.dropped {
+		return fmt.Errorf("database %q does not exist", d.Name)
+	}
+
 	if _, exits := d.Table[name]; exits {
 		if !ifNotExists {
 			return fmt.Errorf("table %q already exists", name)
 		}
 		return nil
+	}
+
+	// The directory can vanish while the database lives: names that differ
+	// only by case share one on a case-insensitive filesystem, and dropping
+	// either removes it. Re-create it before every new table file.
+	if err := os.MkdirAll(d.files.databaseDir(d.Name), 0o755); err != nil {
+		return fmt.Errorf("creating directory for database %q: %w", d.Name, err)
 	}
 
 	table, err := NewTable(name, columns, d.files.newTablePath(d.Name))
@@ -138,6 +153,7 @@ func (d *SqlDatabase) Drop() error {
 		}
 	}
 	d.Table = make(map[string]Table)
+	d.dropped = true
 
 	// A non-recursive remove: it refuses a directory that still has files in
 	// it. Database names that differ only by case or Unicode form can share a
