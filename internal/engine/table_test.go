@@ -19,7 +19,7 @@ func cmp(left parser.Token, op parser.TokenType, right parser.Token) *parser.Com
 	return &parser.ComparisonExpression{Left: left, Operator: op, Right: right}
 }
 
-func binary(left parser.Expression, op parser.TokenType, right parser.Expression) *parser.BinaryExpression {
+func binaryExpr(left parser.Expression, op parser.TokenType, right parser.Expression) *parser.BinaryExpression {
 	return &parser.BinaryExpression{Left: left, Operator: op, Right: right}
 }
 
@@ -29,7 +29,7 @@ func usersTable(t *testing.T, extraColumns ...parser.ColumnDefinition) *SqlTable
 		{Name: "id", DataType: parser.IntDataType{}},
 		{Name: "name", DataType: parser.VarCharDataType{Size: 50}},
 	}, extraColumns...)
-	table, err := NewTable("users", columns)
+	table, err := newTempTable(t, "users", columns)
 	require.NoError(t, err)
 	return table
 }
@@ -172,7 +172,7 @@ func TestTable_InsertValues_Concurrent(t *testing.T) {
 }
 
 func TestNewTable_RejectsInvalidDefault(t *testing.T) {
-	_, err := NewTable("users", []parser.ColumnDefinition{
+	_, err := newTempTable(t, "users", []parser.ColumnDefinition{
 		{
 			Name:        "age",
 			DataType:    parser.IntDataType{},
@@ -194,7 +194,7 @@ func TestTable_InsertValues_WrongLiteralKind(t *testing.T) {
 }
 
 func TestTable_InsertValues_PrimaryKeyImpliesNotNull(t *testing.T) {
-	table, err := NewTable("users", []parser.ColumnDefinition{
+	table, err := newTempTable(t, "users", []parser.ColumnDefinition{
 		{Name: "id", DataType: parser.IntDataType{}, Constraints: []parser.Constraint{parser.PrimaryKeyConstraint{}}},
 		{Name: "name", DataType: parser.VarCharDataType{Size: 50}},
 	})
@@ -207,7 +207,7 @@ func TestTable_InsertValues_PrimaryKeyImpliesNotNull(t *testing.T) {
 
 func uniqueUsersTable(t *testing.T) *SqlTable {
 	t.Helper()
-	table, err := NewTable("users", []parser.ColumnDefinition{
+	table, err := newTempTable(t, "users", []parser.ColumnDefinition{
 		{Name: "id", DataType: parser.IntDataType{}, Constraints: []parser.Constraint{parser.PrimaryKeyConstraint{}}},
 		{Name: "email", DataType: parser.VarCharDataType{Size: 100}, Constraints: []parser.Constraint{parser.UniqueConstraint{}}},
 	})
@@ -350,7 +350,7 @@ func TestTable_AlterColumns_AddColumn_DuplicateName(t *testing.T) {
 }
 
 func TestTable_AlterColumns_AddColumn_SecondPrimaryKeyRejected(t *testing.T) {
-	table, err := NewTable("users", []parser.ColumnDefinition{
+	table, err := newTempTable(t, "users", []parser.ColumnDefinition{
 		{Name: "id", DataType: parser.IntDataType{}, Constraints: []parser.Constraint{parser.PrimaryKeyConstraint{}}},
 	})
 	require.NoError(t, err)
@@ -388,7 +388,7 @@ func TestTable_AlterColumns_DropColumn_Unknown(t *testing.T) {
 }
 
 func TestTable_AlterColumns_DropColumn_LastColumnRejected(t *testing.T) {
-	table, err := NewTable("users", []parser.ColumnDefinition{{Name: "id", DataType: parser.IntDataType{}}})
+	table, err := newTempTable(t, "users", []parser.ColumnDefinition{{Name: "id", DataType: parser.IntDataType{}}})
 	require.NoError(t, err)
 
 	err = table.AlterColumns(parser.DropColumnAction{Column: "id"})
@@ -483,7 +483,7 @@ func TestTable_Select_WhereLiteralOnLeft(t *testing.T) {
 }
 
 func TestTable_Select_WhereColumnToColumn(t *testing.T) {
-	table, err := NewTable("users", []parser.ColumnDefinition{
+	table, err := newTempTable(t, "users", []parser.ColumnDefinition{
 		{Name: "id", DataType: parser.IntDataType{}},
 		{Name: "age", DataType: parser.IntDataType{}},
 	})
@@ -515,7 +515,7 @@ func TestTable_Select_WhereAnd(t *testing.T) {
 		tokRow(numTok("2"), strTok("bob")),
 	}))
 
-	where := binary(
+	where := binaryExpr(
 		cmp(identTok("id"), parser.EQ, numTok("2")),
 		parser.AND,
 		cmp(identTok("name"), parser.EQ, strTok("bob")),
@@ -534,7 +534,7 @@ func TestTable_Select_WhereOr(t *testing.T) {
 		tokRow(numTok("3"), strTok("eve")),
 	}))
 
-	where := binary(
+	where := binaryExpr(
 		cmp(identTok("id"), parser.EQ, numTok("1")),
 		parser.OR,
 		cmp(identTok("id"), parser.EQ, numTok("3")),

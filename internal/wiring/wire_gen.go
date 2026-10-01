@@ -19,7 +19,11 @@ import (
 func InitializeServer(cfg *config.Config) (*grpcserver.Server, error) {
 	lexer := parser.NewLexer()
 	parserParser := parser.NewParser(lexer)
-	catalog := engine.NewCatalog()
+	dataDir := ProvideDataDir(cfg)
+	catalog, err := engine.NewCatalog(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	engineEngine := engine.NewEngine(catalog)
 	server := grpcserver.NewServer(cfg, parserParser, engineEngine)
 	return server, nil
@@ -27,4 +31,4 @@ func InitializeServer(cfg *config.Config) (*grpcserver.Server, error) {
 
 // wire.go:
 
-var WireSet = wire.NewSet(parser.WireSet, grpcserver.WireSet, engine.WireSet)
+var WireSet = wire.NewSet(parser.WireSet, grpcserver.WireSet, engine.WireSet, ProvideDataDir)

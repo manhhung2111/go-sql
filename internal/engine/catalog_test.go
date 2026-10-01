@@ -9,7 +9,7 @@ import (
 )
 
 func TestCatalog_CreateDatabase(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 
 	err := catalog.CreateDatabase("testdb")
 
@@ -18,7 +18,7 @@ func TestCatalog_CreateDatabase(t *testing.T) {
 }
 
 func TestCatalog_CreateDatabase_AlreadyExists(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase("testdb"))
 
 	err := catalog.CreateDatabase("testdb")
@@ -27,7 +27,7 @@ func TestCatalog_CreateDatabase_AlreadyExists(t *testing.T) {
 }
 
 func TestCatalog_DropDatabase(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase("testdb"))
 
 	err := catalog.DropDatabase("testdb")
@@ -37,7 +37,7 @@ func TestCatalog_DropDatabase(t *testing.T) {
 }
 
 func TestCatalog_DropDatabase_DoesNotExist(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 
 	err := catalog.DropDatabase("testdb")
 
@@ -45,13 +45,13 @@ func TestCatalog_DropDatabase_DoesNotExist(t *testing.T) {
 }
 
 func TestCatalog_ListDatabases_EmptyCatalog(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 
 	assert.Empty(t, catalog.ListDatabases())
 }
 
 func TestCatalog_ListDatabases_SortedOrder(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	require.NoError(t, catalog.CreateDatabase("zebra"))
 	require.NoError(t, catalog.CreateDatabase("apple"))
 	require.NoError(t, catalog.CreateDatabase("mango"))
@@ -60,7 +60,7 @@ func TestCatalog_ListDatabases_SortedOrder(t *testing.T) {
 }
 
 func TestCatalog_ConcurrentAccess(t *testing.T) {
-	catalog := NewCatalog()
+	catalog := newTestCatalog(t)
 	const n = 50
 
 	var wg sync.WaitGroup
