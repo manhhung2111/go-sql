@@ -12,30 +12,6 @@ import (
 	"manhhung2111/go-sql/internal/parser"
 )
 
-// stringRows renders rows the way Select does, for comparing a result with
-// what Rows holds.
-func stringRows(rows [][]any) [][]string {
-	out := make([][]string, len(rows))
-	for i, row := range rows {
-		out[i] = make([]string, len(row))
-		for j, v := range row {
-			out[i][j] = stringifyValue(v)
-		}
-	}
-	return out
-}
-
-func TestTable_Select_ReadsTheFileNotRows(t *testing.T) {
-	table := usersTable(t)
-	fourUsers(t, table)
-	table.Rows = nil // the file alone must answer
-
-	resp, err := table.Select([]string{"*"}, nil)
-
-	require.NoError(t, err)
-	assert.Equal(t, [][]string{{"1", "bob"}, {"2", "sam"}, {"3", "amy"}, {"4", "lee"}}, resp.Rows)
-}
-
 func TestTable_Select_SeesEveryMigratedStatement(t *testing.T) {
 	table := usersTable(t)
 	fourUsers(t, table)
@@ -50,7 +26,6 @@ func TestTable_Select_SeesEveryMigratedStatement(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"id", "age"}, resp.Columns)
 	assert.ElementsMatch(t, [][]string{{"1", "18"}, {"2", "18"}, {"4", "18"}, {"5", "50"}}, resp.Rows)
-	assert.ElementsMatch(t, stringRows(table.Rows), resp.Rows, "the file answers exactly what Rows holds")
 }
 
 func TestTable_Select_AcrossManyPages(t *testing.T) {
@@ -145,5 +120,9 @@ func TestTable_Select_ConcurrentWithWriters(t *testing.T) {
 	resp, err := table.Select([]string{"*"}, nil)
 	require.NoError(t, err)
 	assert.Len(t, resp.Rows, writers*perWriter)
-	assertMirrored(t, table)
+	seen := make(map[int64]bool)
+	for _, row := range fileRows(t, table) {
+		seen[row[0].(int64)] = true
+	}
+	assert.Len(t, seen, writers*perWriter, "every insert is in the file exactly once")
 }

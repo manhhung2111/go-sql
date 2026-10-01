@@ -22,8 +22,11 @@ func TestTable_InsertValues_MirrorsRowsToFile(t *testing.T) {
 	}))
 	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("3"), strTok("amy"))}))
 
-	assert.Len(t, table.Rows, 3)
-	assertMirrored(t, table)
+	assertTableRows(t, table,
+		[]any{int64(1), "bob"},
+		[]any{int64(2), "sam"},
+		[]any{int64(3), "amy"},
+	)
 }
 
 func TestTable_InsertValues_MirrorsNullAndEmptyStringDistinctly(t *testing.T) {
@@ -33,7 +36,6 @@ func TestTable_InsertValues_MirrorsNullAndEmptyStringDistinctly(t *testing.T) {
 	// Row 2: note is the empty string.
 	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("2"), strTok("sam"), strTok(""))}))
 
-	assertMirrored(t, table)
 	onDisk := fileRows(t, table)
 	require.Len(t, onDisk, 2)
 	assert.Equal(t, []any{int64(1), "", nil}, onDisk[0])
@@ -52,7 +54,10 @@ func TestTable_InsertValues_MirrorsAcrossManyPages(t *testing.T) {
 
 	require.NoError(t, table.InsertValues(nil, rows))
 
-	assertMirrored(t, table)
+	onDisk := fileRows(t, table)
+	require.Len(t, onDisk, n)
+	assert.Equal(t, []any{int64(0), name}, onDisk[0])
+	assert.Equal(t, []any{int64(n - 1), name}, onDisk[n-1])
 	info, err := os.Stat(table.path)
 	require.NoError(t, err)
 	assert.Greater(t, info.Size(), int64(2*16*1024), "the rows span several pages")
@@ -72,7 +77,6 @@ func TestTable_InsertValues_RejectedBatchWritesNothingToFile(t *testing.T) {
 	})
 
 	require.Error(t, err)
-	assert.Empty(t, table.Rows)
 	assert.Empty(t, fileRows(t, table))
 }
 
@@ -86,8 +90,7 @@ func TestTable_InsertValues_OversizedRowIsRejectedBeforeAnythingIsWritten(t *tes
 	})
 
 	assert.ErrorContains(t, err, "row too large")
-	assert.Empty(t, table.Rows, "the batch is all-or-nothing")
-	assert.Empty(t, fileRows(t, table), "the row that did fit was not written either")
+	assert.Empty(t, fileRows(t, table), "the batch is all-or-nothing: the row that did fit was not written either")
 }
 
 func TestTable_InsertValues_LargestRowThatFitsIsStored(t *testing.T) {
@@ -97,7 +100,9 @@ func TestTable_InsertValues_LargestRowThatFitsIsStored(t *testing.T) {
 
 	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"), strTok(bio))}))
 
-	assertMirrored(t, table)
+	onDisk := fileRows(t, table)
+	require.Len(t, onDisk, 1)
+	assert.Equal(t, bio, onDisk[0][2])
 }
 
 func TestTable_InsertValues_OnAClosedTableFails(t *testing.T) {
@@ -107,7 +112,6 @@ func TestTable_InsertValues_OnAClosedTableFails(t *testing.T) {
 	err := table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("bob"))})
 
 	assert.EqualError(t, err, `table "users" is closed`)
-	assert.Empty(t, table.Rows)
 }
 
 func TestTable_InsertValues_TableWithNoColumns(t *testing.T) {
@@ -116,6 +120,5 @@ func TestTable_InsertValues_TableWithNoColumns(t *testing.T) {
 
 	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(), tokRow()}))
 
-	assert.Len(t, table.Rows, 2)
-	assertMirrored(t, table)
+	assertTableRows(t, table, []any{}, []any{})
 }
