@@ -37,12 +37,14 @@ func newTestDatabase(t *testing.T) Database {
 	return db
 }
 
-// newTempTable is NewTable over a temp-dir file, with the same (table, err)
-// result so a call site only changes the function name. The table's file is
-// closed when the test ends.
+// newTempTable is NewTable over a temp-dir data directory, with the same
+// (table, err) result so a call site only changes the function name. The
+// table's file is closed when the test ends.
 func newTempTable(t *testing.T, name string, columns []parser.ColumnDefinition) (*SqlTable, error) {
 	t.Helper()
-	table, err := NewTable(name, columns, filepath.Join(t.TempDir(), "1.tbl"))
+	files, err := newFileAllocator(DataDir(t.TempDir()))
+	require.NoError(t, err)
+	table, err := NewTable(name, columns, files, "testdb")
 	if err != nil {
 		return nil, err
 	}
