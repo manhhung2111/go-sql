@@ -541,8 +541,54 @@ func (t *SqlTable) Delete(where parser.Expression) error {
 		}
 	}
 
+	// Mirror the delete onto the table's file before committing it to Rows,
+	// so a failed write leaves Rows untouched.
+	if err := t.deleteFromFile(where, columnIndex); err != nil {
+		return err
+	}
+
 	t.Rows = kept
 	return nil
+}
+
+// deleteFromFile tombstones every live row of the table's file that matches
+// where, then fsyncs once. The matching rows are collected before the first
+// tombstone is written, so an evaluation error touches nothing, and a row is
+// never tombstoned while the scan is still reading its page; only an I/O error
+// can leave the delete partly applied, and the engine has no WAL to undo that.
+// The matches come from the file's own rows, not from Rows: the two can drift
+// until every statement is migrated, and a row that exists in only one of them
+// is simply not a match in the other. Callers hold t.mu, and have already
+// evaluated where against Rows, so an invalid where was reported there first.
+func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[string]int) error {
+	if t.file == nil {
+		return fmt.Errorf("table %q is closed", t.Name)
+	}
+
+	var matched []storage.RowID
+	for row, err := range t.file.Scan() {
+		if err != nil {
+			return err
+		}
+		decoded, err := DecodeRow(t.Columns, row.Bytes)
+		if err != nil {
+			return err
+		}
+		isMatch, err := evalWhere(where, decoded, columnIndex, t.Columns)
+		if err != nil {
+			return err
+		}
+		if isMatch {
+			matched = append(matched, row.ID)
+		}
+	}
+
+	for _, id := range matched {
+		if err := t.file.Delete(id); err != nil {
+			return err
+		}
+	}
+	return t.file.Sync()
 }
 
 // resolvedAssignment is an Assignment resolved to its schema index and
