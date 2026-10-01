@@ -47,8 +47,10 @@ func TestTable_AddColumn_RewritesTheFileInTheNewSchema(t *testing.T) {
 
 	require.NoError(t, table.AlterColumns(parser.AddColumnAction{Column: ageColumn}))
 
-	assert.Equal(t, []any{int64(1), "bob", int64(18)}, table.Rows[0])
-	assertMirrored(t, table)
+	assertTableRows(t, table,
+		[]any{int64(1), "bob", int64(18)},
+		[]any{int64(2), "sam", int64(18)},
+	)
 	assert.NotEqual(t, oldPath, table.path, "the rewrite goes to a new file")
 	assert.Equal(t, []string{filepath.Base(table.path)}, filesInTableDir(t, table), "and the old file is gone")
 }
@@ -61,8 +63,10 @@ func TestTable_AddColumn_NullableColumnBackfillsNull(t *testing.T) {
 		Column: parser.ColumnDefinition{Name: "note", DataType: parser.TextDataType{}},
 	}))
 
-	assertMirrored(t, table)
-	assert.Equal(t, []any{int64(1), "bob", nil}, fileRows(t, table)[0])
+	assertTableRows(t, table,
+		[]any{int64(1), "bob", nil},
+		[]any{int64(2), "sam", nil},
+	)
 }
 
 func TestTable_DropColumn_RewritesTheFileInTheNewSchema(t *testing.T) {
@@ -75,8 +79,7 @@ func TestTable_DropColumn_RewritesTheFileInTheNewSchema(t *testing.T) {
 
 	require.NoError(t, table.AlterColumns(parser.DropColumnAction{Column: "name"}))
 
-	assert.Equal(t, []any{int64(1), int64(30)}, table.Rows[0])
-	assertMirrored(t, table)
+	assertTableRows(t, table, []any{int64(1), int64(30)}, []any{int64(2), int64(40)})
 	assert.NotEqual(t, oldPath, table.path)
 	assert.Equal(t, []string{filepath.Base(table.path)}, filesInTableDir(t, table))
 }
@@ -90,7 +93,7 @@ func TestTable_RenameColumn_LeavesTheFileAlone(t *testing.T) {
 
 	assert.Equal(t, path, table.path, "rows are positional, so a rename needs no rewrite")
 	assert.Equal(t, []string{filepath.Base(path)}, filesInTableDir(t, table))
-	assertMirrored(t, table)
+	assertTableRows(t, table, []any{int64(1), "bob"}, []any{int64(2), "sam"})
 }
 
 func TestTable_Alter_RejectedAlterLeavesFileSchemaAndRowsUntouched(t *testing.T) {
@@ -114,7 +117,7 @@ func TestTable_Alter_RejectedAlterLeavesFileSchemaAndRowsUntouched(t *testing.T)
 			twoUsers(t, table)
 			path := table.path
 			wantColumns := append([]parser.ColumnDefinition(nil), table.Columns...)
-			wantRows := append([][]any(nil), table.Rows...)
+			wantRows := fileRows(t, table)
 
 			err := table.AlterColumns(tc.action)
 
@@ -122,8 +125,7 @@ func TestTable_Alter_RejectedAlterLeavesFileSchemaAndRowsUntouched(t *testing.T)
 			assert.Equal(t, path, table.path)
 			assert.Equal(t, []string{filepath.Base(path)}, filesInTableDir(t, table), "no stray new file")
 			assert.Equal(t, wantColumns, table.Columns)
-			assert.Equal(t, wantRows, table.Rows)
-			assertMirrored(t, table)
+			assert.Equal(t, wantRows, fileRows(t, table))
 		})
 	}
 }
@@ -139,7 +141,7 @@ func TestTable_DropColumn_TheOnlyColumnIsRejectedWithoutTouchingTheFile(t *testi
 	assert.EqualError(t, err, "cannot drop the only column")
 	assert.Equal(t, path, table.path)
 	assert.Equal(t, []string{filepath.Base(path)}, filesInTableDir(t, table))
-	assertMirrored(t, table)
+	assertTableRows(t, table, []any{int64(1)})
 }
 
 func TestTable_AddColumn_ThatMakesARowTooLargeIsRejected(t *testing.T) {
@@ -156,7 +158,7 @@ func TestTable_AddColumn_ThatMakesARowTooLargeIsRejected(t *testing.T) {
 	assert.Len(t, table.Columns, 3, "the schema is unchanged")
 	assert.Equal(t, path, table.path)
 	assert.Equal(t, []string{filepath.Base(path)}, filesInTableDir(t, table), "no stray new file")
-	assertMirrored(t, table)
+	assert.Len(t, fileRows(t, table), 1, "the row is still in the file, in the old layout")
 }
 
 func TestTable_Alter_OnAClosedTableFails(t *testing.T) {
@@ -176,8 +178,7 @@ func TestTable_Alter_OnAnEmptyTable(t *testing.T) {
 	require.NoError(t, table.AlterColumns(parser.AddColumnAction{Column: ageColumn}))
 	require.NoError(t, table.AlterColumns(parser.DropColumnAction{Column: "name"}))
 
-	assert.Empty(t, table.Rows)
-	assertMirrored(t, table)
+	assertTableRows(t, table)
 	assert.NotEqual(t, oldPath, table.path)
 	assert.Equal(t, []string{filepath.Base(table.path)}, filesInTableDir(t, table))
 }
@@ -194,7 +195,9 @@ func TestTable_Alter_ManyPages(t *testing.T) {
 
 	require.NoError(t, table.AlterColumns(parser.AddColumnAction{Column: ageColumn}))
 
-	assertMirrored(t, table)
+	onDisk := fileRows(t, table)
+	require.Len(t, onDisk, n)
+	assert.Equal(t, []any{int64(0), name, int64(18)}, onDisk[0])
 	info, err := os.Stat(table.path)
 	require.NoError(t, err)
 	assert.Greater(t, info.Size(), int64(2*16*1024), "the rewritten rows span several pages")
@@ -209,21 +212,9 @@ func TestTable_Alter_InsertAfterAlterMirrorsInTheNewLayout(t *testing.T) {
 
 	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("3"), strTok("amy"), numTok("50"))}))
 
-	assertMirrored(t, table)
-	assert.Equal(t, []any{int64(3), "amy", int64(50)}, fileRows(t, table)[2])
-}
-
-// The rewrite is built from Rows, not from the old file, so it also re-syncs a
-// file that drifted from Rows: until DELETE and UPDATE are migrated they change
-// Rows without touching the file. Cutting Rows directly reproduces that drift
-// regardless of which statements have been migrated.
-func TestTable_Alter_ResyncsAFileThatDriftedFromRows(t *testing.T) {
-	table := usersTable(t)
-	twoUsers(t, table)
-	table.Rows = table.Rows[:1] // the file still holds two rows
-
-	require.NoError(t, table.AlterColumns(parser.AddColumnAction{Column: ageColumn}))
-
-	assert.Len(t, fileRows(t, table), 1)
-	assertMirrored(t, table)
+	assertTableRows(t, table,
+		[]any{int64(1), "bob", int64(18)},
+		[]any{int64(2), "sam", int64(18)},
+		[]any{int64(3), "amy", int64(50)},
+	)
 }

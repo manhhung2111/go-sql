@@ -12,14 +12,6 @@ import (
 	"manhhung2111/go-sql/internal/storage"
 )
 
-// An UPDATE appends the new version of a row to the file and tombstones the
-// old one, so the file holds the same rows as Rows but not necessarily in the
-// same order.
-func assertMirroredAsSet(t *testing.T, table *SqlTable) {
-	t.Helper()
-	assert.ElementsMatch(t, table.Rows, fileRows(t, table), "the file must hold exactly the table's rows, in any order")
-}
-
 func setTo(column string, value parser.Token) parser.Assignment {
 	return parser.Assignment{Column: column, Value: value}
 }
@@ -33,9 +25,13 @@ func TestTable_Update_MirrorsToFile(t *testing.T) {
 		cmp(identTok("id"), parser.EQ, numTok("2")),
 	))
 
-	assert.Equal(t, []any{int64(2), "zed"}, table.Rows[1])
-	assertMirroredAsSet(t, table)
-	assert.Len(t, fileRows(t, table), 4, "the old version is tombstoned, not left beside the new one")
+	// Exactly four rows: the old version is tombstoned, not left beside the new one.
+	assertTableRowsAnyOrder(t, table,
+		[]any{int64(1), "bob"},
+		[]any{int64(2), "zed"},
+		[]any{int64(3), "amy"},
+		[]any{int64(4), "lee"},
+	)
 }
 
 func TestTable_Update_WithoutWhereUpdatesEveryRow(t *testing.T) {
@@ -44,11 +40,12 @@ func TestTable_Update_WithoutWhereUpdatesEveryRow(t *testing.T) {
 
 	require.NoError(t, table.Update([]parser.Assignment{setTo("name", strTok("x"))}, nil))
 
-	for _, row := range table.Rows {
-		assert.Equal(t, "x", row[1])
-	}
-	assertMirroredAsSet(t, table)
-	assert.Len(t, fileRows(t, table), 4)
+	assertTableRowsAnyOrder(t, table,
+		[]any{int64(1), "x"},
+		[]any{int64(2), "x"},
+		[]any{int64(3), "x"},
+		[]any{int64(4), "x"},
+	)
 }
 
 func TestTable_Update_MultipleAssignmentsMirror(t *testing.T) {
@@ -63,8 +60,10 @@ func TestTable_Update_MultipleAssignmentsMirror(t *testing.T) {
 		cmp(identTok("id"), parser.EQ, numTok("1")),
 	))
 
-	assert.Equal(t, []any{int64(1), "z", int64(99)}, table.Rows[0])
-	assertMirroredAsSet(t, table)
+	assertTableRowsAnyOrder(t, table,
+		[]any{int64(1), "z", int64(99)},
+		[]any{int64(2), "sam", int64(40)},
+	)
 }
 
 func TestTable_Update_NoMatchLeavesTheFileAlone(t *testing.T) {
@@ -76,7 +75,13 @@ func TestTable_Update_NoMatchLeavesTheFileAlone(t *testing.T) {
 		cmp(identTok("id"), parser.EQ, numTok("99")),
 	))
 
-	assertMirrored(t, table) // nothing moved, so even the order is unchanged
+	// Nothing moved, so even the order is unchanged.
+	assertTableRows(t, table,
+		[]any{int64(1), "bob"},
+		[]any{int64(2), "sam"},
+		[]any{int64(3), "amy"},
+		[]any{int64(4), "lee"},
+	)
 }
 
 func TestTable_Update_AcrossManyPages(t *testing.T) {
@@ -95,9 +100,15 @@ func TestTable_Update_AcrossManyPages(t *testing.T) {
 		cmp(identTok("id"), parser.LT, numTok("700")),
 	))
 
-	assert.Len(t, table.Rows, n)
-	assertMirroredAsSet(t, table)
-	assert.Len(t, fileRows(t, table), n)
+	onDisk := fileRows(t, table)
+	require.Len(t, onDisk, n)
+	updated := 0
+	for _, row := range onDisk {
+		if row[1] == "m" {
+			updated++
+		}
+	}
+	assert.Equal(t, 700, updated)
 }
 
 func TestTable_Update_FailedUpdateLeavesFileAndRowsUntouched(t *testing.T) {
@@ -119,13 +130,12 @@ func TestTable_Update_FailedUpdateLeavesFileAndRowsUntouched(t *testing.T) {
 				tokRow(numTok("1"), strTok("a@x.com")),
 				tokRow(numTok("2"), strTok("b@x.com")),
 			}))
-			wantRows := append([][]any(nil), table.Rows...)
+			wantRows := fileRows(t, table)
 
 			err := table.Update(tc.assignments, tc.where)
 
 			assert.EqualError(t, err, tc.wantErr)
-			assert.Equal(t, wantRows, table.Rows)
-			assertMirrored(t, table) // untouched, so even the order is unchanged
+			assert.Equal(t, wantRows, fileRows(t, table)) // untouched, so even the order is unchanged
 		})
 	}
 }
@@ -139,26 +149,23 @@ func TestTable_Update_RowThatGrowsPastAPageIsRejectedAtomically(t *testing.T) {
 		tokRow(numTok("1"), strTok("a"), strTok("short")),
 		tokRow(numTok("2"), strTok("b"), strTok(bio)),
 	}))
-	wantRows := append([][]any(nil), table.Rows...)
+	wantRows := fileRows(t, table)
 
 	// A longer name pushes row 2 over the limit; row 1 would still fit.
 	err := table.Update([]parser.Assignment{setTo("name", strTok("a-much-longer-name"))}, nil)
 
 	assert.ErrorContains(t, err, "row too large")
-	assert.Equal(t, wantRows, table.Rows)
-	assertMirrored(t, table)
+	assert.Equal(t, wantRows, fileRows(t, table))
 }
 
 func TestTable_Update_OnAClosedTableFails(t *testing.T) {
 	table := usersTable(t)
 	fourUsers(t, table)
-	wantRows := append([][]any(nil), table.Rows...)
 	require.NoError(t, table.Close())
 
 	err := table.Update([]parser.Assignment{setTo("name", strTok("zed"))}, nil)
 
 	assert.EqualError(t, err, `table "users" is closed`)
-	assert.Equal(t, wantRows, table.Rows, "Rows is only committed after the file step succeeds")
 }
 
 func TestTable_Update_IsOnDiskOnceItReturns(t *testing.T) {
@@ -181,7 +188,7 @@ func TestTable_Update_IsOnDiskOnceItReturns(t *testing.T) {
 		require.NoError(t, err)
 		onDisk = append(onDisk, decoded)
 	}
-	assert.ElementsMatch(t, table.Rows, onDisk)
+	assert.ElementsMatch(t, fileRows(t, table), onDisk)
 }
 
 func TestTable_Update_ThenDeleteThenInsertStayMirrored(t *testing.T) {
@@ -197,8 +204,11 @@ func TestTable_Update_ThenDeleteThenInsertStayMirrored(t *testing.T) {
 	require.NoError(t, table.Delete(cmp(identTok("name"), parser.EQ, strTok("zed"))))
 	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("5"), strTok("kay"))}))
 
-	assert.Len(t, table.Rows, 3) // ids 3, 4 and 5
-	assertMirroredAsSet(t, table)
+	assertTableRowsAnyOrder(t, table,
+		[]any{int64(3), "amy"},
+		[]any{int64(4), "lee"},
+		[]any{int64(5), "kay"},
+	)
 }
 
 func TestTable_Update_UnassignedNullColumnsStayNull(t *testing.T) {
@@ -208,24 +218,5 @@ func TestTable_Update_UnassignedNullColumnsStayNull(t *testing.T) {
 
 	require.NoError(t, table.Update([]parser.Assignment{setTo("name", strTok("zed"))}, nil))
 
-	assert.Equal(t, []any{int64(1), "zed", nil}, table.Rows[0])
-	assertMirroredAsSet(t, table)
-	assert.Equal(t, []any{int64(1), "zed", nil}, fileRows(t, table)[0])
-}
-
-// Rows and the file can drift until every statement is migrated. UPDATE decides
-// the file's matches from the file's own rows, so a row that matches in only one
-// of them is simply not updated in the other, and that is not an error.
-func TestTable_Update_ToleratesAFileThatDriftedFromRows(t *testing.T) {
-	table := usersTable(t)
-	fourUsers(t, table)
-	table.Rows[1][1] = "zed" // Rows says id 2 is "zed"; the file still says "sam"
-
-	require.NoError(t, table.Update(
-		[]parser.Assignment{setTo("name", strTok("kim"))},
-		cmp(identTok("name"), parser.EQ, strTok("zed")),
-	))
-
-	assert.Equal(t, []any{int64(2), "kim"}, table.Rows[1], "Rows updated the row it knows as zed")
-	assert.Len(t, fileRows(t, table), 4, "the file has no zed, so it updated nothing and raised no error")
+	assertTableRows(t, table, []any{int64(1), "zed", nil})
 }

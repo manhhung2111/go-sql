@@ -42,9 +42,9 @@ func TestTable_InsertValues_ExplicitOutOfOrderColumns(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	require.Len(t, table.Rows, 1)
-	assert.Equal(t, int64(1), table.Rows[0][0]) // id, schema position 0
-	assert.Equal(t, "bob", table.Rows[0][1])    // name, schema position 1
+	require.Len(t, fileRows(t, table), 1)
+	assert.Equal(t, int64(1), fileRows(t, table)[0][0]) // id, schema position 0
+	assert.Equal(t, "bob", fileRows(t, table)[0][1])    // name, schema position 1
 }
 
 func TestTable_InsertValues_NoColumnList_FullRow(t *testing.T) {
@@ -55,8 +55,8 @@ func TestTable_InsertValues_NoColumnList_FullRow(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	require.Len(t, table.Rows, 1)
-	assert.Equal(t, []any{int64(1), "bob"}, table.Rows[0])
+	require.Len(t, fileRows(t, table), 1)
+	assert.Equal(t, []any{int64(1), "bob"}, fileRows(t, table)[0])
 }
 
 func TestTable_InsertValues_NoColumnList_ArityMismatch(t *testing.T) {
@@ -109,8 +109,8 @@ func TestTable_InsertValues_OmittedColumnWithDefault(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	require.Len(t, table.Rows, 1)
-	assert.Equal(t, int64(18), table.Rows[0][2])
+	require.Len(t, fileRows(t, table), 1)
+	assert.Equal(t, int64(18), fileRows(t, table)[0][2])
 }
 
 func TestTable_InsertValues_OmittedNotNullColumnWithoutDefault(t *testing.T) {
@@ -135,8 +135,8 @@ func TestTable_InsertValues_OmittedNullableColumn(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	require.Len(t, table.Rows, 1)
-	assert.Nil(t, table.Rows[0][2])
+	require.Len(t, fileRows(t, table), 1)
+	assert.Nil(t, fileRows(t, table)[0][2])
 }
 
 func TestTable_InsertValues_BatchIsAtomic(t *testing.T) {
@@ -149,7 +149,7 @@ func TestTable_InsertValues_BatchIsAtomic(t *testing.T) {
 	})
 
 	require.Error(t, err)
-	assert.Empty(t, table.Rows, "a failed batch must not leave earlier rows committed")
+	assert.Empty(t, fileRows(t, table), "a failed batch must not leave earlier rows committed")
 }
 
 func TestTable_InsertValues_Concurrent(t *testing.T) {
@@ -168,7 +168,7 @@ func TestTable_InsertValues_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	assert.Len(t, table.Rows, n)
+	assert.Len(t, fileRows(t, table), n)
 }
 
 func TestNewTable_RejectsInvalidDefault(t *testing.T) {
@@ -233,7 +233,7 @@ func TestTable_InsertValues_DuplicateWithinSameBatch(t *testing.T) {
 	})
 
 	assert.EqualError(t, err, `duplicate entry a@x.com for column "email"`)
-	assert.Empty(t, table.Rows, "a rejected batch must not leave earlier rows committed")
+	assert.Empty(t, fileRows(t, table), "a rejected batch must not leave earlier rows committed")
 }
 
 func TestTable_InsertValues_DuplicatePrimaryKey(t *testing.T) {
@@ -252,8 +252,8 @@ func TestTable_InsertValues_NullExemptFromUniqueness(t *testing.T) {
 	err := table.InsertValues([]string{"id"}, [][]parser.Token{tokRow(numTok("2"))})
 
 	require.NoError(t, err, "two rows both omitting the nullable UNIQUE column must not conflict")
-	assert.Nil(t, table.Rows[0][1])
-	assert.Nil(t, table.Rows[1][1])
+	assert.Nil(t, fileRows(t, table)[0][1])
+	assert.Nil(t, fileRows(t, table)[1][1])
 }
 
 func TestTable_AlterColumns_AddColumn_EmptyTable(t *testing.T) {
@@ -284,9 +284,9 @@ func TestTable_AlterColumns_AddColumn_BackfillsDefault(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	require.Len(t, table.Rows[0], 3)
-	assert.Equal(t, int64(18), table.Rows[0][2])
-	assert.Equal(t, int64(18), table.Rows[1][2])
+	require.Len(t, fileRows(t, table)[0], 3)
+	assert.Equal(t, int64(18), fileRows(t, table)[0][2])
+	assert.Equal(t, int64(18), fileRows(t, table)[1][2])
 }
 
 func TestTable_AlterColumns_AddColumn_BackfillsNull(t *testing.T) {
@@ -298,7 +298,7 @@ func TestTable_AlterColumns_AddColumn_BackfillsNull(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Nil(t, table.Rows[0][2])
+	assert.Nil(t, fileRows(t, table)[0][2])
 }
 
 func TestTable_AlterColumns_AddColumn_NotNullWithoutDefaultRejected(t *testing.T) {
@@ -375,8 +375,8 @@ func TestTable_AlterColumns_DropColumn(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, table.Columns, 1)
 	assert.Equal(t, "id", table.Columns[0].Name)
-	require.Len(t, table.Rows[0], 1)
-	assert.Equal(t, int64(1), table.Rows[0][0])
+	require.Len(t, fileRows(t, table)[0], 1)
+	assert.Equal(t, int64(1), fileRows(t, table)[0][0])
 }
 
 func TestTable_AlterColumns_DropColumn_Unknown(t *testing.T) {
@@ -590,9 +590,9 @@ func TestTable_Delete_WhereFiltersRows(t *testing.T) {
 	err := table.Delete(cmp(identTok("id"), parser.EQ, numTok("2")))
 
 	require.NoError(t, err)
-	assert.Equal(t, []any{int64(1), "bob"}, table.Rows[0])
-	assert.Equal(t, []any{int64(3), "eve"}, table.Rows[1])
-	assert.Len(t, table.Rows, 2)
+	assert.Equal(t, []any{int64(1), "bob"}, fileRows(t, table)[0])
+	assert.Equal(t, []any{int64(3), "eve"}, fileRows(t, table)[1])
+	assert.Len(t, fileRows(t, table), 2)
 }
 
 func TestTable_Delete_NoWhereDeletesEverything(t *testing.T) {
@@ -605,7 +605,7 @@ func TestTable_Delete_NoWhereDeletesEverything(t *testing.T) {
 	err := table.Delete(nil)
 
 	require.NoError(t, err)
-	assert.Empty(t, table.Rows)
+	assert.Empty(t, fileRows(t, table))
 }
 
 func TestTable_Delete_NoMatches(t *testing.T) {
@@ -615,7 +615,7 @@ func TestTable_Delete_NoMatches(t *testing.T) {
 	err := table.Delete(cmp(identTok("id"), parser.EQ, numTok("99")))
 
 	require.NoError(t, err)
-	assert.Len(t, table.Rows, 1)
+	assert.Len(t, fileRows(t, table), 1)
 }
 
 func TestTable_Delete_UnknownColumnLeavesTableUntouched(t *testing.T) {
@@ -628,7 +628,7 @@ func TestTable_Delete_UnknownColumnLeavesTableUntouched(t *testing.T) {
 	err := table.Delete(cmp(identTok("nickname"), parser.EQ, strTok("bob")))
 
 	assert.EqualError(t, err, `unknown column "nickname"`)
-	assert.Len(t, table.Rows, 2, "a rejected DELETE must not partially compact the table")
+	assert.Len(t, fileRows(t, table), 2, "a rejected DELETE must not partially compact the table")
 }
 
 func TestTable_Delete_Concurrent(t *testing.T) {
@@ -646,7 +646,7 @@ func TestTable_Delete_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	assert.Empty(t, table.Rows)
+	assert.Empty(t, fileRows(t, table))
 }
 
 func assign(column string, value parser.Token) parser.Assignment {
@@ -666,8 +666,9 @@ func TestTable_Update_WhereFiltersRows(t *testing.T) {
 	)
 
 	require.NoError(t, err)
-	assert.Equal(t, []any{int64(1), "robert"}, table.Rows[0])
-	assert.Equal(t, []any{int64(2), "sam"}, table.Rows[1], "unmatched rows must be untouched")
+	// The updated row is rewritten at the end of the file, so the order is unspecified.
+	assert.ElementsMatch(t, [][]any{{int64(1), "robert"}, {int64(2), "sam"}}, fileRows(t, table),
+		"the matched row is updated and the unmatched row untouched")
 }
 
 func TestTable_Update_NoWhereUpdatesEverything(t *testing.T) {
@@ -680,8 +681,8 @@ func TestTable_Update_NoWhereUpdatesEverything(t *testing.T) {
 	err := table.Update([]parser.Assignment{assign("name", strTok("anon"))}, nil)
 
 	require.NoError(t, err)
-	assert.Equal(t, "anon", table.Rows[0][1])
-	assert.Equal(t, "anon", table.Rows[1][1])
+	assert.Equal(t, "anon", fileRows(t, table)[0][1])
+	assert.Equal(t, "anon", fileRows(t, table)[1][1])
 }
 
 func TestTable_Update_MultipleAssignments(t *testing.T) {
@@ -694,7 +695,7 @@ func TestTable_Update_MultipleAssignments(t *testing.T) {
 	)
 
 	require.NoError(t, err)
-	assert.Equal(t, []any{int64(99), "robert"}, table.Rows[0])
+	assert.Equal(t, []any{int64(99), "robert"}, fileRows(t, table)[0])
 }
 
 func TestTable_Update_UnknownColumnInSet(t *testing.T) {
@@ -704,7 +705,7 @@ func TestTable_Update_UnknownColumnInSet(t *testing.T) {
 	err := table.Update([]parser.Assignment{assign("nickname", strTok("bob"))}, nil)
 
 	assert.EqualError(t, err, `unknown column "nickname"`)
-	assert.Equal(t, "bob", table.Rows[0][1], "a rejected UPDATE must not partially apply")
+	assert.Equal(t, "bob", fileRows(t, table)[0][1], "a rejected UPDATE must not partially apply")
 }
 
 func TestTable_Update_UnknownColumnInWhere(t *testing.T) {
@@ -717,7 +718,7 @@ func TestTable_Update_UnknownColumnInWhere(t *testing.T) {
 	)
 
 	assert.EqualError(t, err, `unknown column "nickname"`)
-	assert.Equal(t, "bob", table.Rows[0][1])
+	assert.Equal(t, "bob", fileRows(t, table)[0][1])
 }
 
 func TestTable_Update_WrongLiteralKind(t *testing.T) {
@@ -727,7 +728,7 @@ func TestTable_Update_WrongLiteralKind(t *testing.T) {
 	err := table.Update([]parser.Assignment{assign("id", strTok("not-a-number"))}, nil)
 
 	assert.EqualError(t, err, `column "id": expected a numeric value, got not-a-number`)
-	assert.Equal(t, int64(1), table.Rows[0][0], "a rejected UPDATE must not partially apply")
+	assert.Equal(t, int64(1), fileRows(t, table)[0][0], "a rejected UPDATE must not partially apply")
 }
 
 func TestTable_Update_DuplicateAgainstAnotherRow(t *testing.T) {
@@ -743,7 +744,7 @@ func TestTable_Update_DuplicateAgainstAnotherRow(t *testing.T) {
 	)
 
 	assert.EqualError(t, err, `duplicate entry b@x.com for column "email"`)
-	assert.Equal(t, "a@x.com", table.Rows[0][1], "a rejected UPDATE must not partially apply")
+	assert.Equal(t, "a@x.com", fileRows(t, table)[0][1], "a rejected UPDATE must not partially apply")
 }
 
 func TestTable_Update_DuplicateWithinSameBatch(t *testing.T) {
@@ -768,7 +769,7 @@ func TestTable_Update_ReassigningUniqueColumnToItsOwnValueSucceeds(t *testing.T)
 	)
 
 	require.NoError(t, err, "re-assigning a unique column to its current value must not self-conflict")
-	assert.Equal(t, "a@x.com", table.Rows[0][1])
+	assert.Equal(t, "a@x.com", fileRows(t, table)[0][1])
 }
 
 func TestTable_Rename(t *testing.T) {

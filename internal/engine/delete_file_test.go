@@ -28,8 +28,11 @@ func TestTable_Delete_MirrorsToFile(t *testing.T) {
 
 	require.NoError(t, table.Delete(cmp(identTok("id"), parser.EQ, numTok("2"))))
 
-	assert.Len(t, table.Rows, 3)
-	assertMirrored(t, table)
+	assertTableRows(t, table,
+		[]any{int64(1), "bob"},
+		[]any{int64(3), "amy"},
+		[]any{int64(4), "lee"},
+	)
 }
 
 func TestTable_Delete_WithoutWhereEmptiesTheFileAndItStaysUsable(t *testing.T) {
@@ -38,12 +41,10 @@ func TestTable_Delete_WithoutWhereEmptiesTheFileAndItStaysUsable(t *testing.T) {
 
 	require.NoError(t, table.Delete(nil))
 
-	assert.Empty(t, table.Rows)
 	assert.Empty(t, fileRows(t, table))
 
 	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("9"), strTok("zed"))}))
-	assertMirrored(t, table)
-	assert.Len(t, table.Rows, 1)
+	assertTableRows(t, table, []any{int64(9), "zed"})
 }
 
 func TestTable_Delete_NoMatchLeavesTheFileAlone(t *testing.T) {
@@ -52,9 +53,12 @@ func TestTable_Delete_NoMatchLeavesTheFileAlone(t *testing.T) {
 
 	require.NoError(t, table.Delete(cmp(identTok("id"), parser.EQ, numTok("99"))))
 
-	assert.Len(t, table.Rows, 4)
-	assert.Len(t, fileRows(t, table), 4)
-	assertMirrored(t, table)
+	assertTableRows(t, table,
+		[]any{int64(1), "bob"},
+		[]any{int64(2), "sam"},
+		[]any{int64(3), "amy"},
+		[]any{int64(4), "lee"},
+	)
 }
 
 func TestTable_Delete_AcrossManyPages(t *testing.T) {
@@ -70,8 +74,9 @@ func TestTable_Delete_AcrossManyPages(t *testing.T) {
 	// Ids 0..699 sit on the first pages, which are not the cached tail page.
 	require.NoError(t, table.Delete(cmp(identTok("id"), parser.LT, numTok("700"))))
 
-	assert.Len(t, table.Rows, n-700)
-	assertMirrored(t, table)
+	onDisk := fileRows(t, table)
+	require.Len(t, onDisk, n-700)
+	assert.Equal(t, int64(700), onDisk[0][0], "the survivors keep their order")
 }
 
 func TestTable_Delete_FailedWhereLeavesFileAndRowsUntouched(t *testing.T) {
@@ -87,13 +92,12 @@ func TestTable_Delete_FailedWhereLeavesFileAndRowsUntouched(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			table := usersTable(t)
 			fourUsers(t, table)
-			wantRows := append([][]any(nil), table.Rows...)
+			wantRows := fileRows(t, table)
 
 			err := table.Delete(tc.where)
 
 			assert.EqualError(t, err, tc.wantErr)
-			assert.Equal(t, wantRows, table.Rows)
-			assertMirrored(t, table)
+			assert.Equal(t, wantRows, fileRows(t, table))
 		})
 	}
 }
@@ -107,9 +111,9 @@ func TestTable_Delete_NullNeverMatches(t *testing.T) {
 	require.NoError(t, table.Delete(cmp(identTok("age"), parser.NEQ, numTok("7"))))
 
 	// NULL != 7 never matches, so only the row with age 5 goes.
-	require.Len(t, table.Rows, 1)
-	assert.Equal(t, int64(1), table.Rows[0][0])
-	assertMirrored(t, table)
+	onDisk := fileRows(t, table)
+	require.Len(t, onDisk, 1)
+	assert.Equal(t, int64(1), onDisk[0][0])
 }
 
 func TestTable_Delete_OnAClosedTableFails(t *testing.T) {
@@ -120,7 +124,6 @@ func TestTable_Delete_OnAClosedTableFails(t *testing.T) {
 	err := table.Delete(nil)
 
 	assert.EqualError(t, err, `table "users" is closed`)
-	assert.Len(t, table.Rows, 4, "Rows is only committed after the file step succeeds")
 }
 
 func TestTable_Delete_ThenInsertMirrorsInOrder(t *testing.T) {
@@ -130,7 +133,6 @@ func TestTable_Delete_ThenInsertMirrorsInOrder(t *testing.T) {
 
 	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("5"), strTok("kay"))}))
 
-	assertMirrored(t, table)
 	ids := []int64{}
 	for _, row := range fileRows(t, table) {
 		ids = append(ids, row[0].(int64))
@@ -155,20 +157,5 @@ func TestTable_Delete_IsOnDiskOnceItReturns(t *testing.T) {
 		require.NoError(t, err)
 		onDisk = append(onDisk, decoded)
 	}
-	assert.Equal(t, table.Rows, onDisk)
-}
-
-// Until UPDATE is migrated it changes Rows without touching the file, so a row
-// can differ between the two. DELETE decides the file's matches from the
-// file's own rows, so such drift is not an error and does not fail the
-// statement.
-func TestTable_Delete_ToleratesAFileThatDriftedFromRows(t *testing.T) {
-	table := usersTable(t)
-	fourUsers(t, table)
-	table.Rows[1][1] = "zed" // Rows says id 2 is "zed"; the file still says "sam"
-
-	require.NoError(t, table.Delete(cmp(identTok("name"), parser.EQ, strTok("zed"))))
-
-	assert.Len(t, table.Rows, 3, "Rows deleted the row it knows as zed")
-	assert.Len(t, fileRows(t, table), 4, "the file has no zed, so it deleted nothing and raised no error")
+	assert.Equal(t, fileRows(t, table), onDisk)
 }
