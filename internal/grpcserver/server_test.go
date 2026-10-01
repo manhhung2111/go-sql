@@ -297,7 +297,9 @@ func TestParseQuery_Update(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, sqlpb.StatusCode_OK, resp.GetCode())
-	assert.Equal(t, [][]string{{"1", "robert"}, {"2", "sam"}}, rowStrings(resp.GetRows()))
+	// An UPDATE writes the new version of a row at the end of the table's file,
+	// so row order after an UPDATE is unspecified.
+	assert.ElementsMatch(t, [][]string{{"1", "robert"}, {"2", "sam"}}, rowStrings(resp.GetRows()))
 }
 
 func TestParseQuery_Delete(t *testing.T) {
