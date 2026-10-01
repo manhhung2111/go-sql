@@ -691,8 +691,73 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 		newRows[i] = updated
 	}
 
+	// Mirror the update onto the table's file before committing it to Rows,
+	// so a failed write leaves Rows untouched.
+	if err := t.updateFile(resolved, where, columnIndex); err != nil {
+		return err
+	}
+
 	t.Rows = newRows
 	return nil
+}
+
+// updateFile writes the update to the table's file: every live row matching
+// where gets a new version, appended with the assignments applied, and its
+// old version is tombstoned, then one fsync. The matching rows are collected
+// and every new version is encoded and size-checked before the first write,
+// so a bad update writes nothing; only an I/O error can leave it partly
+// applied, and the engine has no WAL to undo that. The new versions are
+// inserted before the old ones are tombstoned, so a crash between the two can
+// duplicate a row but never lose one. The matches come from the file's own
+// rows, not from Rows, which can drift until every statement is migrated, and
+// uniqueness is not re-checked here: Rows already did. Callers hold t.mu and
+// have already evaluated where and the assignments against Rows, so an
+// invalid statement was reported there first.
+func (t *SqlTable) updateFile(assignments []resolvedAssignment, where parser.Expression, columnIndex map[string]int) error {
+	if t.file == nil {
+		return fmt.Errorf("table %q is closed", t.Name)
+	}
+
+	var oldIDs []storage.RowID
+	var updated [][]any
+	for row, err := range t.file.Scan() {
+		if err != nil {
+			return err
+		}
+		decoded, err := DecodeRow(t.Columns, row.Bytes)
+		if err != nil {
+			return err
+		}
+		isMatch, err := evalWhere(where, decoded, columnIndex, t.Columns)
+		if err != nil {
+			return err
+		}
+		if !isMatch {
+			continue
+		}
+		for _, a := range assignments {
+			decoded[a.index] = a.value
+		}
+		oldIDs = append(oldIDs, row.ID)
+		updated = append(updated, decoded)
+	}
+
+	encoded, err := encodeRows(t.Columns, updated)
+	if err != nil {
+		return err
+	}
+
+	for _, b := range encoded {
+		if _, err := t.file.Insert(b); err != nil {
+			return err
+		}
+	}
+	for _, id := range oldIDs {
+		if err := t.file.Delete(id); err != nil {
+			return err
+		}
+	}
+	return t.file.Sync()
 }
 
 // Rename sets the table's own name; called by Database.RenameTable to
