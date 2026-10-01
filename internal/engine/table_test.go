@@ -19,7 +19,7 @@ func cmp(left parser.Token, op parser.TokenType, right parser.Token) *parser.Com
 	return &parser.ComparisonExpression{Left: left, Operator: op, Right: right}
 }
 
-func binary(left parser.Expression, op parser.TokenType, right parser.Expression) *parser.BinaryExpression {
+func binaryExpr(left parser.Expression, op parser.TokenType, right parser.Expression) *parser.BinaryExpression {
 	return &parser.BinaryExpression{Left: left, Operator: op, Right: right}
 }
 
@@ -515,7 +515,7 @@ func TestTable_Select_WhereAnd(t *testing.T) {
 		tokRow(numTok("2"), strTok("bob")),
 	}))
 
-	where := binary(
+	where := binaryExpr(
 		cmp(identTok("id"), parser.EQ, numTok("2")),
 		parser.AND,
 		cmp(identTok("name"), parser.EQ, strTok("bob")),
@@ -534,7 +534,7 @@ func TestTable_Select_WhereOr(t *testing.T) {
 		tokRow(numTok("3"), strTok("eve")),
 	}))
 
-	where := binary(
+	where := binaryExpr(
 		cmp(identTok("id"), parser.EQ, numTok("1")),
 		parser.OR,
 		cmp(identTok("id"), parser.EQ, numTok("3")),
