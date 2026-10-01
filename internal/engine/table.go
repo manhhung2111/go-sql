@@ -212,8 +212,43 @@ func (t *SqlTable) InsertValues(columns []string, values [][]parser.Token) error
 		newRows[i] = rowValues
 	}
 
+	// Phase 3: mirror the batch onto the table's file before committing it
+	// to Rows, so a failed write leaves Rows untouched.
+	if err := t.appendToFile(newRows); err != nil {
+		return err
+	}
+
 	t.Rows = append(t.Rows, newRows...)
 	return nil
+}
+
+// appendToFile writes rows to the table's file with a single fsync. Every
+// row is encoded and size-checked before the first write, so a bad batch
+// writes nothing; only an I/O error can leave it partly written, and the
+// engine has no WAL to undo that. Callers hold t.mu.
+func (t *SqlTable) appendToFile(rows [][]any) error {
+	if t.file == nil {
+		return fmt.Errorf("table %q is closed", t.Name)
+	}
+
+	encoded := make([][]byte, len(rows))
+	for i, row := range rows {
+		b, err := EncodeRow(t.Columns, row)
+		if err != nil {
+			return err
+		}
+		if len(b) > storage.MaxRowSize {
+			return fmt.Errorf("row too large: %d bytes exceeds the %d-byte limit", len(b), storage.MaxRowSize)
+		}
+		encoded[i] = b
+	}
+
+	for _, b := range encoded {
+		if _, err := t.file.Insert(b); err != nil {
+			return err
+		}
+	}
+	return t.file.Sync()
 }
 
 // Select performs a full-table scan, keeping rows where matches (a nil

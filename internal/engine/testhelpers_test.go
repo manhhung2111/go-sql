@@ -6,6 +6,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"manhhung2111/go-sql/internal/parser"
@@ -60,4 +61,24 @@ func tableFiles(t *testing.T, dir, database string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// fileRows scans the table's file and decodes every live row with the
+// table's current schema: the shadow copy of Rows.
+func fileRows(t *testing.T, table *SqlTable) [][]any {
+	t.Helper()
+	rows := make([][]any, 0)
+	for row, err := range table.file.Scan() {
+		require.NoError(t, err)
+		decoded, err := DecodeRow(table.Columns, row.Bytes)
+		require.NoError(t, err)
+		rows = append(rows, decoded)
+	}
+	return rows
+}
+
+// assertMirrored checks the file holds exactly the table's rows, in order.
+func assertMirrored(t *testing.T, table *SqlTable) {
+	t.Helper()
+	assert.Equal(t, table.Rows, fileRows(t, table), "the file must hold exactly the table's rows, in order")
 }
