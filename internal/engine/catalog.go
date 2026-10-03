@@ -40,6 +40,19 @@ func NewCatalog(dataDir DataDir) (Catalog, error) {
 	for name, tables := range loaded.databases {
 		c.Databases[name] = newLoadedDatabase(name, store, tables)
 	}
+
+	// Every survivor is open; whatever no survivor refers to is an orphan. The
+	// allocator scanned ids before this, so a removed orphan's id is never
+	// handed out again.
+	databases := make(map[string]bool, len(loaded.databases))
+	referenced := make(map[int64]bool)
+	for name, tables := range loaded.databases {
+		databases[name] = true
+		for _, table := range tables {
+			referenced[table.fileID] = true
+		}
+	}
+	removeOrphans(files, databases, referenced)
 	return c, nil
 }
 
