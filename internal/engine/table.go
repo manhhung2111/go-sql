@@ -7,6 +7,7 @@ import (
 	"manhhung2111/go-sql/internal/parser"
 	"manhhung2111/go-sql/internal/storage"
 	"os"
+	"slices"
 	"sync"
 )
 
@@ -16,7 +17,8 @@ type Table interface {
 	AlterColumns(action parser.AlterAction) error
 	Delete(where parser.Expression) error
 	Update(assignments []parser.Assignment, where parser.Expression) error
-	Rename(name string)
+	// Rename records the new name in the catalog, then sets it.
+	Rename(name string) error
 	// Close releases the table's file. It is idempotent.
 	Close() error
 	// Drop closes the table's file and deletes it. It is idempotent.
@@ -35,9 +37,9 @@ type SqlTable struct {
 	file   storage.File
 	fileID int64
 
-	// files and database let the table allocate a replacement file when a
-	// schema change rewrites its rows.
-	files    *fileAllocator
+	// store records the table's schema and file in the catalog, and its files
+	// allocator names a replacement file when a schema change rewrites rows.
+	store    *catalogStore
 	database string
 }
 
@@ -50,7 +52,7 @@ type SqlTable struct {
 // The schema is validated before anything is created on disk, so a rejected
 // schema never leaves a file or directory behind. The table's file is a new,
 // empty file in database's directory.
-func NewTable(name string, columns []parser.ColumnDefinition, files *fileAllocator, database string) (*SqlTable, error) {
+func NewTable(name string, columns []parser.ColumnDefinition, store *catalogStore, database string) (*SqlTable, error) {
 	validated := make([]parser.ColumnDefinition, 0, len(columns))
 	for _, column := range columns {
 		if err := validateNewColumn(name, validated, column); err != nil {
@@ -59,14 +61,25 @@ func NewTable(name string, columns []parser.ColumnDefinition, files *fileAllocat
 		validated = append(validated, column)
 	}
 
-	tf, err := createTableFile(files, database, files.nextFileID())
+	// The catalog row is encoded before any file exists, so a schema too
+	// large for a page fails without leaving anything behind.
+	id := store.files.nextFileID()
+	row, err := encodeTableRow(database, name, id, validated)
 	if err != nil {
+		return nil, err
+	}
+	tf, err := createTableFile(store.files, database, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.addTable(database, name, row); err != nil {
+		discardFile(tf)
 		return nil, err
 	}
 
 	return &SqlTable{
 		Name: name, Columns: columns,
-		path: tf.path, file: tf.file, fileID: tf.id, files: files, database: database,
+		path: tf.path, file: tf.file, fileID: tf.id, store: store, database: database,
 	}, nil
 }
 
@@ -376,7 +389,7 @@ func (t *SqlTable) rebuildFile(id int64, columns []parser.ColumnDefinition, tran
 		return tableFile{}, fmt.Errorf("table %q is closed", t.Name)
 	}
 
-	tf, err := createTableFile(t.files, t.database, id)
+	tf, err := createTableFile(t.store.files, t.database, id)
 	if err != nil {
 		return tableFile{}, err
 	}
@@ -402,6 +415,27 @@ func (t *SqlTable) rebuildFile(id int64, columns []parser.ColumnDefinition, tran
 		}
 	}
 	if err := tf.file.Sync(); err != nil {
+		discardFile(tf)
+		return tableFile{}, err
+	}
+	return tf, nil
+}
+
+// rebuildAndRecord streams the table into a new file in the new schema and
+// records that file and schema in the catalog. Nothing about the table
+// changes: callers commit t.Columns and adopt the file only after this
+// returns, and on any failure the new file is gone.
+func (t *SqlTable) rebuildAndRecord(columns []parser.ColumnDefinition, transform func(row []any) []any) (tableFile, error) {
+	id := t.store.files.nextFileID()
+	row, err := encodeTableRow(t.database, t.Name, id, columns)
+	if err != nil {
+		return tableFile{}, err
+	}
+	tf, err := t.rebuildFile(id, columns, transform)
+	if err != nil {
+		return tableFile{}, err
+	}
+	if err := t.store.replaceTable(t.database, t.Name, t.Name, row); err != nil {
 		discardFile(tf)
 		return tableFile{}, err
 	}
@@ -568,7 +602,7 @@ func (t *SqlTable) addColumn(column parser.ColumnDefinition) error {
 	// Build the replacement file before touching the table, so a failure
 	// (a row that no longer fits on a page, an I/O error) changes nothing.
 	newColumns := append(append([]parser.ColumnDefinition{}, t.Columns...), column)
-	tf, err := t.rebuildFile(t.files.nextFileID(), newColumns, func(row []any) []any {
+	tf, err := t.rebuildAndRecord(newColumns, func(row []any) []any {
 		return append(row, filler)
 	})
 	if err != nil {
@@ -599,7 +633,7 @@ func (t *SqlTable) dropColumn(name string) error {
 	}
 
 	newColumns := append(append([]parser.ColumnDefinition{}, t.Columns[:idx]...), t.Columns[idx+1:]...)
-	tf, err := t.rebuildFile(t.files.nextFileID(), newColumns, func(row []any) []any {
+	tf, err := t.rebuildAndRecord(newColumns, func(row []any) []any {
 		return append(row[:idx:idx], row[idx+1:]...)
 	})
 	if err != nil {
@@ -630,7 +664,18 @@ func (t *SqlTable) renameColumn(oldName, newName string) error {
 		}
 	}
 
-	t.Columns[idx].Name = newName
+	// The caller's column slice is never edited in place: the new schema is
+	// recorded in the catalog first and only then becomes the table's.
+	newColumns := slices.Clone(t.Columns)
+	newColumns[idx].Name = newName
+	row, err := encodeTableRow(t.database, t.Name, t.fileID, newColumns)
+	if err != nil {
+		return err
+	}
+	if err := t.store.replaceTable(t.database, t.Name, t.Name, row); err != nil {
+		return err
+	}
+	t.Columns = newColumns
 	return nil
 }
 
@@ -811,12 +856,22 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 	return t.file.Sync()
 }
 
-// Rename sets the table's own name; called by Database.RenameTable to
-// keep it in sync after re-keying the owning database's table map.
-func (t *SqlTable) Rename(name string) {
+// Rename records the table's new name in the catalog and then sets it; called
+// by Database.RenameTable before it re-keys the owning database's table map,
+// so a failed catalog write leaves the table under its old name.
+func (t *SqlTable) Rename(name string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	row, err := encodeTableRow(t.database, name, t.fileID, t.Columns)
+	if err != nil {
+		return err
+	}
+	if err := t.store.replaceTable(t.database, t.Name, name, row); err != nil {
+		return err
+	}
 	t.Name = name
+	return nil
 }
 
 func (t *SqlTable) Close() error {

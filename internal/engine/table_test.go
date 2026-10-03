@@ -775,7 +775,7 @@ func TestTable_Update_ReassigningUniqueColumnToItsOwnValueSucceeds(t *testing.T)
 func TestTable_Rename(t *testing.T) {
 	table := usersTable(t)
 
-	table.Rename("people")
+	require.NoError(t, table.Rename("people"))
 
 	assert.Equal(t, "people", table.Name)
 }

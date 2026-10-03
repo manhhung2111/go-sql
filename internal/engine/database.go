@@ -26,25 +26,29 @@ type SqlDatabase struct {
 	mu    sync.RWMutex
 	Name  string
 	Table map[string]Table
-	files *fileAllocator
+	store *catalogStore
 	// dropped is set by Drop; the database can no longer create tables.
 	dropped bool
 }
 
-// NewDatabase validates name (it becomes a directory name) and creates the
-// database's directory.
-func NewDatabase(name string, files *fileAllocator) (Database, error) {
+// NewDatabase validates name (it becomes a directory name), creates the
+// database's directory and records the database in the catalog.
+func NewDatabase(name string, store *catalogStore) (Database, error) {
 	if err := validateDatabaseName(name); err != nil {
 		return nil, err
 	}
-	if err := files.makeDir(files.databaseDir(name)); err != nil {
+	if err := store.files.makeDir(store.files.databaseDir(name)); err != nil {
 		return nil, fmt.Errorf("creating directory for database %q: %w", name, err)
+	}
+
+	if err := store.addDatabase(name); err != nil {
+		return nil, fmt.Errorf("recording database %q: %w", name, err)
 	}
 
 	return &SqlDatabase{
 		Name:  name,
 		Table: make(map[string]Table),
-		files: files,
+		store: store,
 	}, nil
 }
 
@@ -73,7 +77,7 @@ func (d *SqlDatabase) CreateTable(name string, columns []parser.ColumnDefinition
 		return nil
 	}
 
-	table, err := NewTable(name, columns, d.files, d.Name)
+	table, err := NewTable(name, columns, d.store, d.Name)
 	if err != nil {
 		return err
 	}
@@ -94,15 +98,19 @@ func (d *SqlDatabase) RenameTable(oldName, newName string) error {
 		return fmt.Errorf("table %q already exists", newName)
 	}
 
+	// The table writes its catalog row first; only then is the map re-keyed.
+	if err := table.Rename(newName); err != nil {
+		return err
+	}
 	delete(d.Table, oldName)
 	d.Table[newName] = table
-	table.Rename(newName)
 	return nil
 }
 
-// DropTable removes the table from the database first, then deletes its file:
-// if the file cannot be removed the table is still gone and the file is a
-// harmless orphan, never a table pointing at a missing file.
+// DropTable commits by tombstoning the table's catalog row, then removes the
+// table from the database and deletes its file: if the file cannot be removed
+// the table is still gone and the file is a harmless orphan, never a table
+// pointing at a missing file.
 func (d *SqlDatabase) DropTable(name string, ifExists bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -115,6 +123,9 @@ func (d *SqlDatabase) DropTable(name string, ifExists bool) error {
 		return fmt.Errorf("table %q does not exist", name)
 	}
 
+	if err := d.store.removeTable(d.Name, name); err != nil {
+		return fmt.Errorf("dropping table %q: %w", name, err)
+	}
 	delete(d.Table, name)
 	if err := table.Drop(); err != nil {
 		return fmt.Errorf("table %q dropped, but removing its file failed: %w", name, err)
@@ -152,7 +163,7 @@ func (d *SqlDatabase) Drop() error {
 	// it. Database names that differ only by case or Unicode form can share a
 	// directory on some filesystems, and this must never delete a file it did
 	// not create.
-	if err := os.Remove(d.files.databaseDir(d.Name)); err != nil &&
+	if err := os.Remove(d.store.files.databaseDir(d.Name)); err != nil &&
 		!errors.Is(err, fs.ErrNotExist) &&
 		!errors.Is(err, syscall.ENOTEMPTY) &&
 		!errors.Is(err, syscall.EEXIST) {
