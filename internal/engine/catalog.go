@@ -31,10 +31,16 @@ func NewCatalog(dataDir DataDir) (Catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &SqlCatalog{
-		Databases: make(map[string]Database),
-		store:     store,
-	}, nil
+	loaded, err := store.load()
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("loading catalog: %w", err)
+	}
+	c := &SqlCatalog{Databases: make(map[string]Database, len(loaded.databases)), store: store}
+	for name, tables := range loaded.databases {
+		c.Databases[name] = newLoadedDatabase(name, store, tables)
+	}
+	return c, nil
 }
 
 // ListDatabases returns database names in sorted order — map iteration
