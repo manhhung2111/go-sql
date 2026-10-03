@@ -37,7 +37,7 @@ func NewDatabase(name string, files *fileAllocator) (Database, error) {
 	if err := validateDatabaseName(name); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(files.databaseDir(name), 0o755); err != nil {
+	if err := files.makeDir(files.databaseDir(name)); err != nil {
 		return nil, fmt.Errorf("creating directory for database %q: %w", name, err)
 	}
 

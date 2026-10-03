@@ -75,7 +75,7 @@ func NewTable(name string, columns []parser.ColumnDefinition, files *fileAllocat
 // can remove a directory another database still uses. The file is created
 // exclusively, so it can never adopt an old file's rows.
 func createTableFile(files *fileAllocator, database string) (string, storage.File, error) {
-	if err := os.MkdirAll(files.databaseDir(database), 0o755); err != nil {
+	if err := files.makeDir(files.databaseDir(database)); err != nil {
 		return "", nil, fmt.Errorf("creating directory for database %q: %w", database, err)
 	}
 

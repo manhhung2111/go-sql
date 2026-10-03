@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"manhhung2111/go-sql/internal/storage"
 )
 
 // DataDir is the root directory all table files live under:
@@ -80,6 +82,26 @@ func maxTableFileID(root string) (int64, error) {
 
 func (a *fileAllocator) databaseDir(database string) string {
 	return filepath.Join(string(a.dataDir), "data", database)
+}
+
+// makeDir creates dir and any missing parents, then fsyncs dir, each
+// ancestor up to the data directory, and the data directory's parent, so a
+// catalog row written afterwards can never point into a directory a power
+// loss forgets.
+func (a *fileAllocator) makeDir(dir string) error {
+	root := filepath.Clean(string(a.dataDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for p := dir; ; p = filepath.Dir(p) {
+		if err := storage.SyncDir(p); err != nil {
+			return err
+		}
+		if p == root || p == filepath.Dir(p) {
+			break
+		}
+	}
+	return storage.SyncDir(filepath.Dir(root))
 }
 
 // newTablePath returns a path for a new table file in database's directory,

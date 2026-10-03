@@ -103,3 +103,35 @@ func TestValidateDatabaseName(t *testing.T) {
 		assert.ErrorContains(t, validateDatabaseName(name), "invalid database name", "%q", name)
 	}
 }
+
+func TestFileAllocator_makeDir(t *testing.T) {
+	t.Run("creates every missing level", func(t *testing.T) {
+		dir := t.TempDir()
+		a, err := newFileAllocator(DataDir(dir))
+		require.NoError(t, err)
+
+		require.NoError(t, a.makeDir(a.databaseDir("shop")))
+
+		info, err := os.Stat(filepath.Join(dir, "data", "shop"))
+		require.NoError(t, err)
+		assert.True(t, info.IsDir())
+	})
+
+	t.Run("is idempotent", func(t *testing.T) {
+		a, err := newFileAllocator(DataDir(t.TempDir()))
+		require.NoError(t, err)
+
+		require.NoError(t, a.makeDir(a.databaseDir("shop")))
+		require.NoError(t, a.makeDir(a.databaseDir("shop")))
+	})
+
+	t.Run("fails when a path component is a file", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "data"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "data", "shop"), []byte("x"), 0o644))
+		a, err := newFileAllocator(DataDir(dir))
+		require.NoError(t, err)
+
+		assert.Error(t, a.makeDir(a.databaseDir("shop")))
+	})
+}
