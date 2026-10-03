@@ -31,9 +31,7 @@ func newTestCatalog(t *testing.T) Catalog {
 
 func newTestDatabase(t *testing.T) Database {
 	t.Helper()
-	files, err := newFileAllocator(DataDir(t.TempDir()))
-	require.NoError(t, err)
-	db, err := NewDatabase("testdb", files)
+	db, err := NewDatabase("testdb", newTestStore(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
@@ -44,9 +42,7 @@ func newTestDatabase(t *testing.T) Database {
 // table's file is closed when the test ends.
 func newTempTable(t *testing.T, name string, columns []parser.ColumnDefinition) (*SqlTable, error) {
 	t.Helper()
-	files, err := newFileAllocator(DataDir(t.TempDir()))
-	require.NoError(t, err)
-	table, err := NewTable(name, columns, files, "testdb")
+	table, err := NewTable(name, columns, newTestStore(t), "testdb")
 	if err != nil {
 		return nil, err
 	}

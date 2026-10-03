@@ -14,11 +14,10 @@ import (
 
 func TestNewTable_CreatesItsFileInTheDatabaseDirectory(t *testing.T) {
 	dir := t.TempDir()
-	files, err := newFileAllocator(DataDir(dir))
-	require.NoError(t, err)
+	store := newTestStoreAt(t, dir)
 
 	// The database directory does not exist yet; creating the table makes it.
-	table, err := NewTable("users", idColumn, files, "shop")
+	table, err := NewTable("users", idColumn, store, "shop")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = table.Close() })
 
@@ -29,13 +28,12 @@ func TestNewTable_CreatesItsFileInTheDatabaseDirectory(t *testing.T) {
 
 func TestNewTable_RejectedSchemaCreatesNothingOnDisk(t *testing.T) {
 	dir := t.TempDir()
-	files, err := newFileAllocator(DataDir(dir))
-	require.NoError(t, err)
+	store := newTestStoreAt(t, dir)
 
-	_, err = NewTable("users", []parser.ColumnDefinition{
+	_, err := NewTable("users", []parser.ColumnDefinition{
 		{Name: "id", DataType: parser.IntDataType{}},
 		{Name: "id", DataType: parser.IntDataType{}},
-	}, files, "shop")
+	}, store, "shop")
 
 	require.Error(t, err)
 	_, statErr := os.Stat(filepath.Join(dir, "data"))

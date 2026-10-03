@@ -19,7 +19,7 @@ type Catalog interface {
 type SqlCatalog struct {
 	mu        sync.RWMutex
 	Databases map[string]Database
-	files     *fileAllocator
+	store     *catalogStore
 }
 
 func NewCatalog(dataDir DataDir) (Catalog, error) {
@@ -27,9 +27,13 @@ func NewCatalog(dataDir DataDir) (Catalog, error) {
 	if err != nil {
 		return nil, err
 	}
+	store, err := openCatalogStore(files)
+	if err != nil {
+		return nil, err
+	}
 	return &SqlCatalog{
 		Databases: make(map[string]Database),
-		files:     files,
+		store:     store,
 	}, nil
 }
 
@@ -56,7 +60,7 @@ func (c *SqlCatalog) CreateDatabase(name string) error {
 		return fmt.Errorf("database %q already exists", name)
 	}
 
-	db, err := NewDatabase(name, c.files)
+	db, err := NewDatabase(name, c.store)
 	if err != nil {
 		return err
 	}
@@ -65,9 +69,9 @@ func (c *SqlCatalog) CreateDatabase(name string) error {
 	return nil
 }
 
-// DropDatabase removes the database from the catalog first, then deletes its
-// files: a failure removing them leaves orphan files, never a database that
-// points at missing ones.
+// DropDatabase commits by tombstoning the database's catalog row; only then
+// does the database leave memory and its files go. A failure removing the
+// files leaves orphans, never a database that points at missing ones.
 func (c *SqlCatalog) DropDatabase(name string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -77,9 +81,16 @@ func (c *SqlCatalog) DropDatabase(name string) error {
 		return fmt.Errorf("database %q does not exist", name)
 	}
 
+	// The database row is the commit point. If it cannot be tombstoned the
+	// database is untouched.
+	if err := c.store.removeDatabase(name); err != nil {
+		return fmt.Errorf("dropping database %q: %w", name, err)
+	}
 	delete(c.Databases, name)
-	if err := db.Drop(); err != nil {
-		return fmt.Errorf("database %q dropped, but removing its files failed: %w", name, err)
+
+	// From here the database is gone; what is left is clean-up.
+	if err := errors.Join(c.store.removeDatabaseTables(name), db.Drop()); err != nil {
+		return fmt.Errorf("database %q dropped, but cleaning up after it failed: %w", name, err)
 	}
 	return nil
 }
@@ -105,5 +116,6 @@ func (c *SqlCatalog) Close() error {
 			errs = append(errs, fmt.Errorf("database %q: %w", name, err))
 		}
 	}
+	errs = append(errs, c.store.Close())
 	return errors.Join(errs...)
 }
