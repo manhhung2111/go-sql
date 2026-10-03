@@ -31,8 +31,9 @@ type SqlTable struct {
 	// path and file are the table's heap file: the only copy of its rows.
 	// Every statement reads and writes it under mu, and none holds a whole
 	// table in memory.
-	path string
-	file storage.File
+	path   string
+	file   storage.File
+	fileID int64
 
 	// files and database let the table allocate a replacement file when a
 	// schema change rewrites its rows.
@@ -58,15 +59,22 @@ func NewTable(name string, columns []parser.ColumnDefinition, files *fileAllocat
 		validated = append(validated, column)
 	}
 
-	path, file, err := createTableFile(files, database)
+	tf, err := createTableFile(files, database, files.nextFileID())
 	if err != nil {
 		return nil, err
 	}
 
 	return &SqlTable{
 		Name: name, Columns: columns,
-		path: path, file: file, files: files, database: database,
+		path: tf.path, file: tf.file, fileID: tf.id, files: files, database: database,
 	}, nil
+}
+
+// tableFile is a table's heap file together with the id its name carries.
+type tableFile struct {
+	id   int64
+	path string
+	file storage.File
 }
 
 // createTableFile makes a new, empty table file in database's directory,
@@ -74,17 +82,17 @@ func NewTable(name string, columns []parser.ColumnDefinition, files *fileAllocat
 // case share one directory on a case-insensitive filesystem, so dropping one
 // can remove a directory another database still uses. The file is created
 // exclusively, so it can never adopt an old file's rows.
-func createTableFile(files *fileAllocator, database string) (string, storage.File, error) {
+func createTableFile(files *fileAllocator, database string, id int64) (tableFile, error) {
 	if err := files.makeDir(files.databaseDir(database)); err != nil {
-		return "", nil, fmt.Errorf("creating directory for database %q: %w", database, err)
+		return tableFile{}, fmt.Errorf("creating directory for database %q: %w", database, err)
 	}
 
-	path := files.newTablePath(database)
+	path := files.tablePath(database, id)
 	file, err := storage.CreateFile(path)
 	if err != nil {
-		return "", nil, err
+		return tableFile{}, err
 	}
-	return path, file, nil
+	return tableFile{id: id, path: path, file: file}, nil
 }
 
 // validateNewColumn checks column against a table's existing columns for
@@ -363,41 +371,41 @@ func encodeRowChecked(columns []parser.ColumnDefinition, row []any) ([]byte, err
 // about the table changes, and on any failure the partial file is removed.
 // Callers hold t.mu, and t.Columns must still be the schema of the current
 // file, which is what its rows are decoded with.
-func (t *SqlTable) rebuildFile(columns []parser.ColumnDefinition, transform func(row []any) []any) (string, storage.File, error) {
+func (t *SqlTable) rebuildFile(id int64, columns []parser.ColumnDefinition, transform func(row []any) []any) (tableFile, error) {
 	if t.file == nil {
-		return "", nil, fmt.Errorf("table %q is closed", t.Name)
+		return tableFile{}, fmt.Errorf("table %q is closed", t.Name)
 	}
 
-	path, file, err := createTableFile(t.files, t.database)
+	tf, err := createTableFile(t.files, t.database, id)
 	if err != nil {
-		return "", nil, err
+		return tableFile{}, err
 	}
 
 	for fileRow, err := range t.file.Scan() {
 		if err != nil {
-			discardFile(path, file)
-			return "", nil, err
+			discardFile(tf)
+			return tableFile{}, err
 		}
 		row, err := DecodeRow(t.Columns, fileRow.Bytes)
 		if err != nil {
-			discardFile(path, file)
-			return "", nil, err
+			discardFile(tf)
+			return tableFile{}, err
 		}
 		encoded, err := encodeRowChecked(columns, transform(row))
 		if err != nil {
-			discardFile(path, file)
-			return "", nil, err
+			discardFile(tf)
+			return tableFile{}, err
 		}
-		if _, err := file.Insert(encoded); err != nil {
-			discardFile(path, file)
-			return "", nil, err
+		if _, err := tf.file.Insert(encoded); err != nil {
+			discardFile(tf)
+			return tableFile{}, err
 		}
 	}
-	if err := file.Sync(); err != nil {
-		discardFile(path, file)
-		return "", nil, err
+	if err := tf.file.Sync(); err != nil {
+		discardFile(tf)
+		return tableFile{}, err
 	}
-	return path, file, nil
+	return tf, nil
 }
 
 // countRows counts the live rows of the table's file, stopping once it has
@@ -424,11 +432,11 @@ func (t *SqlTable) countRows(limit int) (int, error) {
 // already committed the new Columns and hold t.mu: if the old file
 // cannot be removed the change is still applied and the old file is a
 // harmless orphan, so the error says so.
-func (t *SqlTable) adoptFile(path string, file storage.File) error {
+func (t *SqlTable) adoptFile(tf tableFile) error {
 	oldPath := t.path
 	closeErr := t.closeLocked()
 
-	t.file, t.path = file, path
+	t.file, t.path, t.fileID = tf.file, tf.path, tf.id
 
 	if err := os.Remove(oldPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return errors.Join(closeErr, fmt.Errorf("column change applied, but removing the old table file %q failed: %w", oldPath, err))
@@ -437,9 +445,9 @@ func (t *SqlTable) adoptFile(path string, file storage.File) error {
 }
 
 // discardFile closes and deletes a file that was never adopted.
-func discardFile(path string, file storage.File) {
-	_ = file.Close()
-	_ = os.Remove(path)
+func discardFile(tf tableFile) {
+	_ = tf.file.Close()
+	_ = os.Remove(tf.path)
 }
 
 // Select performs a full-table scan of the table's file, a page at a time,
@@ -560,7 +568,7 @@ func (t *SqlTable) addColumn(column parser.ColumnDefinition) error {
 	// Build the replacement file before touching the table, so a failure
 	// (a row that no longer fits on a page, an I/O error) changes nothing.
 	newColumns := append(append([]parser.ColumnDefinition{}, t.Columns...), column)
-	path, file, err := t.rebuildFile(newColumns, func(row []any) []any {
+	tf, err := t.rebuildFile(t.files.nextFileID(), newColumns, func(row []any) []any {
 		return append(row, filler)
 	})
 	if err != nil {
@@ -568,7 +576,7 @@ func (t *SqlTable) addColumn(column parser.ColumnDefinition) error {
 	}
 
 	t.Columns = newColumns
-	return t.adoptFile(path, file)
+	return t.adoptFile(tf)
 }
 
 // dropColumn removes column at its schema index by streaming the file
@@ -591,7 +599,7 @@ func (t *SqlTable) dropColumn(name string) error {
 	}
 
 	newColumns := append(append([]parser.ColumnDefinition{}, t.Columns[:idx]...), t.Columns[idx+1:]...)
-	path, file, err := t.rebuildFile(newColumns, func(row []any) []any {
+	tf, err := t.rebuildFile(t.files.nextFileID(), newColumns, func(row []any) []any {
 		return append(row[:idx:idx], row[idx+1:]...)
 	})
 	if err != nil {
@@ -599,7 +607,7 @@ func (t *SqlTable) dropColumn(name string) error {
 	}
 
 	t.Columns = newColumns
-	return t.adoptFile(path, file)
+	return t.adoptFile(tf)
 }
 
 // renameColumn doesn't touch the file — rows are positional, not keyed by

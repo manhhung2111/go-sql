@@ -104,10 +104,11 @@ func (a *fileAllocator) makeDir(dir string) error {
 	return storage.SyncDir(filepath.Dir(root))
 }
 
-// newTablePath returns a path for a new table file in database's directory,
-// with an id no earlier call has returned.
-func (a *fileAllocator) newTablePath(database string) string {
-	id := a.nextID.Add(1) - 1
+// nextFileID returns an id no earlier call has returned.
+func (a *fileAllocator) nextFileID() int64 { return a.nextID.Add(1) - 1 }
+
+// tablePath is where the table file with id lives in database's directory.
+func (a *fileAllocator) tablePath(database string, id int64) string {
 	return filepath.Join(a.databaseDir(database), strconv.FormatInt(id, 10)+tableFileExt)
 }
 
