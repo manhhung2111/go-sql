@@ -31,10 +31,29 @@ func NewCatalog(dataDir DataDir) (Catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &SqlCatalog{
-		Databases: make(map[string]Database),
-		store:     store,
-	}, nil
+	loaded, err := store.load()
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("loading catalog: %w", err)
+	}
+	c := &SqlCatalog{Databases: make(map[string]Database, len(loaded.databases)), store: store}
+	for name, tables := range loaded.databases {
+		c.Databases[name] = newLoadedDatabase(name, store, tables)
+	}
+
+	// Every survivor is open; whatever no survivor refers to is an orphan. The
+	// allocator scanned ids before this, so a removed orphan's id is never
+	// handed out again.
+	databases := make(map[string]bool, len(loaded.databases))
+	referenced := make(map[int64]bool)
+	for name, tables := range loaded.databases {
+		databases[name] = true
+		for _, table := range tables {
+			referenced[table.fileID] = true
+		}
+	}
+	removeOrphans(files, databases, referenced)
+	return c, nil
 }
 
 // ListDatabases returns database names in sorted order — map iteration

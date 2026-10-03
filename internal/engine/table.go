@@ -664,6 +664,10 @@ func (t *SqlTable) renameColumn(oldName, newName string) error {
 		}
 	}
 
+	if t.file == nil {
+		return fmt.Errorf("table %q is closed", t.Name)
+	}
+
 	// The caller's column slice is never edited in place: the new schema is
 	// recorded in the catalog first and only then becomes the table's.
 	newColumns := slices.Clone(t.Columns)
@@ -863,6 +867,11 @@ func (t *SqlTable) Rename(name string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	// A closed table is a dropped one, whose name may belong to a new table
+	// by now: it must not touch the catalog row stored under that name.
+	if t.file == nil {
+		return fmt.Errorf("table %q is closed", t.Name)
+	}
 	row, err := encodeTableRow(t.database, name, t.fileID, t.Columns)
 	if err != nil {
 		return err

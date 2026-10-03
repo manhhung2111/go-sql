@@ -16,19 +16,23 @@ import (
 
 // Injectors from wire.go:
 
-func InitializeServer(cfg *config.Config) (*grpcserver.Server, error) {
+func InitializeServer(cfg *config.Config) (*grpcserver.Server, func(), error) {
 	lexer := parser.NewLexer()
 	parserParser := parser.NewParser(lexer)
 	dataDir := ProvideDataDir(cfg)
-	catalog, err := engine.NewCatalog(dataDir)
+	catalog, cleanup, err := ProvideCatalog(dataDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	engineEngine := engine.NewEngine(catalog)
 	server := grpcserver.NewServer(cfg, parserParser, engineEngine)
-	return server, nil
+	return server, func() {
+		cleanup()
+	}, nil
 }
 
 // wire.go:
 
-var WireSet = wire.NewSet(parser.WireSet, grpcserver.WireSet, engine.WireSet, ProvideDataDir)
+var WireSet = wire.NewSet(parser.WireSet, grpcserver.WireSet, engine.WireSet, ProvideDataDir,
+	ProvideCatalog,
+)

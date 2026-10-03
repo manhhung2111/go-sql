@@ -52,6 +52,20 @@ func NewDatabase(name string, store *catalogStore) (Database, error) {
 	}, nil
 }
 
+// newLoadedDatabase rebuilds a database from its catalog rows. Its directory
+// and files already exist, so nothing is created or written.
+func newLoadedDatabase(name string, store *catalogStore, tables []loadedTable) Database {
+	d := &SqlDatabase{Name: name, Table: make(map[string]Table, len(tables)), store: store}
+	for _, lt := range tables {
+		d.Table[lt.name] = &SqlTable{
+			Name: lt.name, Columns: lt.columns,
+			path: lt.path, file: lt.file, fileID: lt.fileID,
+			store: store, database: name,
+		}
+	}
+	return d
+}
+
 func (d *SqlDatabase) GetTable(name string) (Table, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

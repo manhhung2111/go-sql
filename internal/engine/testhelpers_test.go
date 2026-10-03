@@ -193,3 +193,29 @@ func mustSchema(t *testing.T, columns []parser.ColumnDefinition) string {
 	require.NoError(t, err)
 	return s
 }
+
+func mustExec(t *testing.T, e Engine, database, sql string) Response {
+	t.Helper()
+	statement, err := parser.NewParser(parser.NewLexer()).Parse(sql)
+	require.NoError(t, err, sql)
+	resp, err := e.Execute(statement, database)
+	require.NoError(t, err, sql)
+	return resp
+}
+
+func execError(t *testing.T, e Engine, database, sql string) error {
+	t.Helper()
+	statement, err := parser.NewParser(parser.NewLexer()).Parse(sql)
+	require.NoError(t, err, sql)
+	_, err = e.Execute(statement, database)
+	return err
+}
+
+// restart closes old and opens a new catalog over the same data directory,
+// the way a server restart does.
+func restart(t *testing.T, dir string, old Catalog) (Catalog, Engine) {
+	t.Helper()
+	require.NoError(t, old.Close())
+	c := newTestCatalogAt(t, dir)
+	return c, NewEngine(c)
+}

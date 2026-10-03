@@ -209,3 +209,33 @@ func TestPersist_DropDatabaseWithStaleTableRowsIsNotResurrected(t *testing.T) {
 	_, exists := fresh.GetTable("users")
 	assert.False(t, exists)
 }
+
+// A handle fetched before DROP TABLE must not touch the catalog row of a new
+// table that has since taken the same name.
+func TestPersist_StaleTableHandleCannotRewriteTheCatalog(t *testing.T) {
+	c := newTestCatalog(t)
+	db := createDB(t, c, "shop")
+	require.NoError(t, db.CreateTable("users", usersColumns(), false))
+	stale, _ := db.GetTable("users")
+	require.NoError(t, db.DropTable("users", false))
+	require.NoError(t, db.CreateTable("users", idColumn, false))
+	fresh, _ := db.GetTable("users")
+	want := sysTableRecords(t, storeOf(c))
+
+	t.Run("rename column", func(t *testing.T) {
+		err := stale.AlterColumns(parser.RenameColumnAction{OldName: "name", NewName: "title"})
+
+		assert.ErrorContains(t, err, "is closed")
+		assert.Equal(t, want, sysTableRecords(t, storeOf(c)))
+	})
+
+	t.Run("rename table", func(t *testing.T) {
+		err := stale.Rename("people")
+
+		assert.ErrorContains(t, err, "is closed")
+		assert.Equal(t, want, sysTableRecords(t, storeOf(c)))
+	})
+
+	_, err := fresh.Select([]string{"*"}, nil)
+	assert.NoError(t, err)
+}

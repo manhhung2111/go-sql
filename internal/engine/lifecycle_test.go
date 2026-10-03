@@ -175,10 +175,11 @@ func TestLifecycle_RestartContinuesFileIDs(t *testing.T) {
 	require.NoError(t, db.CreateTable("orders", idColumn, false)) // 2.tbl
 	require.NoError(t, first.Close())
 
-	// The schemas are not persisted yet, so the new catalog knows nothing of
-	// "shop"; the files are still on disk and must not be overwritten.
+	// The new catalog loads "shop" and its tables; a table created now must
+	// not reuse or overwrite an id already on disk.
 	second := newTestCatalogAt(t, dir)
-	db2 := createDB(t, second, "shop")
+	db2, err := second.GetDatabase("shop")
+	require.NoError(t, err)
 	require.NoError(t, db2.CreateTable("invoices", idColumn, false))
 
 	assert.Equal(t, []string{"1.tbl", "2.tbl", "3.tbl"}, tableFiles(t, dir, "shop"))
