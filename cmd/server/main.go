@@ -25,7 +25,7 @@ func main() {
 		log.Fatalf("failed to load config from %s: %v", *configPath, err)
 	}
 
-	server, err := wiring.InitializeServer(cfg)
+	server, cleanup, err := wiring.InitializeServer(cfg)
 	if err != nil {
 		log.Fatalf("failed to initialize server: %v", err)
 	}
@@ -33,6 +33,7 @@ func main() {
 	addr := cfg.Server.Addr()
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
+		cleanup()
 		log.Fatalf("failed to listen on %s: %v", addr, err)
 	}
 
@@ -50,10 +51,12 @@ func main() {
 
 	select {
 	case err := <-serveErr:
+		cleanup()
 		log.Fatalf("server stopped unexpectedly: %v", err)
 	case <-ctx.Done():
 		log.Println("shutdown signal received, stopping gracefully...")
 		grpcServer.GracefulStop()
+		cleanup()
 		log.Println("server stopped")
 	}
 }

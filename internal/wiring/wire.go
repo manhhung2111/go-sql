@@ -20,9 +20,10 @@ var WireSet = wire.NewSet(
 	grpcserver.WireSet,
 	engine.WireSet,
 	ProvideDataDir,
+	ProvideCatalog,
 )
 
-func InitializeServer(cfg *config.Config) (*grpcserver.Server, error) {
+func InitializeServer(cfg *config.Config) (*grpcserver.Server, func(), error) {
 	wire.Build(WireSet)
-	return nil, nil
+	return nil, nil, nil
 }
