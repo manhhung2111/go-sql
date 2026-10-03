@@ -1,0 +1,16 @@
+.git
+.github
+.idea
+.claude
+.superpowers
+.tokensave
+plan
+data
+vendor
+*.test
+*.out
+.env
+*.md
+!README.md
+Dockerfile
+.dockerignore

@@ -1,4 +1,4 @@
-.PHONY: test proto generate
+.PHONY: test proto generate docker-build docker-run
 
 .DEFAULT_GOAL := test
 
@@ -14,3 +14,9 @@ proto:
 
 generate:
 	wire ./internal/wiring
+
+docker-build:
+	docker build -t go-sql .
+
+docker-run:
+	docker run --rm -p 50051:50051 -v go-sql-data:/data go-sql
