@@ -61,3 +61,14 @@ The catalog is durable too: two system heap files under `<storage.data_dir>/sys/
 - Tests: testify (`assert`/`require`), table-driven where there's a matrix of cases. Parser tests use canonical-string-rendering helpers (`whereString`, `dataTypeString`, `constraintStrings`, etc., in `testhelpers_test.go`) instead of comparing raw structs, since `Token` carries a `Position` field that would make otherwise-equivalent results compare unequal.
 - Commits: Conventional Commits (`<type>(scope): description`).
 - `plan/` at the repo root is gitignored — local planning scratch space, never committed.
+
+## Development workflow (TDD)
+
+Every change follows plan, then tests, then implementation. Do not skip a stage.
+
+1. **Plan first.** For anything beyond a trivial edit, write the plan in `plan/` (gitignored) and get the user's approval before touching code. Say which files change and which tests prove it.
+2. **Tests second.** Write the failing test first, run it, and confirm it fails for the right reason (a missing feature, not a typo or compile error you did not intend). No production code before a failing test exists. A bug fix starts with a test that reproduces the bug.
+3. **Implementation last.** Write the minimum code to pass, then run the whole suite (`go test -race ./...`, required when touching `internal/engine`), `go vet ./...` and `gofmt -l .` before committing.
+4. Commit per task (Conventional Commits). The PR's test plan lists the tests that were seen failing first and any mutation checks.
+
+Exceptions, verified by running them instead of by a unit test: documentation, generated code (`*.pb.go`, `wire_gen.go`), and build/CI config (Dockerfile, workflows). The `superpowers:writing-plans` and `superpowers:test-driven-development` skills implement this loop; use them when available.
