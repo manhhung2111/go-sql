@@ -16,7 +16,7 @@ func TestNewFileAllocator(t *testing.T) {
 		a, err := newFileAllocator(DataDir(dir))
 		require.NoError(t, err)
 
-		assert.Equal(t, filepath.Join(dir, "data", "shop", "1.tbl"), a.newTablePath("shop"))
+		assert.Equal(t, filepath.Join(dir, "data", "shop", "1.tbl"), a.tablePath("shop", a.nextFileID()))
 	})
 
 	t.Run("ids are shared across databases and never repeat", func(t *testing.T) {
@@ -24,9 +24,9 @@ func TestNewFileAllocator(t *testing.T) {
 		a, err := newFileAllocator(DataDir(dir))
 		require.NoError(t, err)
 
-		first := a.newTablePath("a")
-		second := a.newTablePath("b")
-		third := a.newTablePath("a")
+		first := a.tablePath("a", a.nextFileID())
+		second := a.tablePath("b", a.nextFileID())
+		third := a.tablePath("a", a.nextFileID())
 
 		assert.Equal(t, filepath.Join(dir, "data", "a", "1.tbl"), first)
 		assert.Equal(t, filepath.Join(dir, "data", "b", "2.tbl"), second)
@@ -50,7 +50,7 @@ func TestNewFileAllocator(t *testing.T) {
 		a, err := newFileAllocator(DataDir(dir))
 		require.NoError(t, err)
 
-		assert.Equal(t, filepath.Join(dir, "data", "a", "10.tbl"), a.newTablePath("a"))
+		assert.Equal(t, filepath.Join(dir, "data", "a", "10.tbl"), a.tablePath("a", a.nextFileID()))
 	})
 
 	t.Run("an empty data directory path is rejected", func(t *testing.T) {
@@ -80,7 +80,7 @@ func TestNewFileAllocator(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				paths <- a.newTablePath("shop")
+				paths <- a.tablePath("shop", a.nextFileID())
 			}()
 		}
 		wg.Wait()
@@ -102,4 +102,45 @@ func TestValidateDatabaseName(t *testing.T) {
 	for _, name := range []string{"", ".", "..", "a/b", `a\b`, "../x", "a\x00b"} {
 		assert.ErrorContains(t, validateDatabaseName(name), "invalid database name", "%q", name)
 	}
+}
+
+func TestFileAllocator_makeDir(t *testing.T) {
+	t.Run("creates every missing level", func(t *testing.T) {
+		dir := t.TempDir()
+		a, err := newFileAllocator(DataDir(dir))
+		require.NoError(t, err)
+
+		require.NoError(t, a.makeDir(a.databaseDir("shop")))
+
+		info, err := os.Stat(filepath.Join(dir, "data", "shop"))
+		require.NoError(t, err)
+		assert.True(t, info.IsDir())
+	})
+
+	t.Run("is idempotent", func(t *testing.T) {
+		a, err := newFileAllocator(DataDir(t.TempDir()))
+		require.NoError(t, err)
+
+		require.NoError(t, a.makeDir(a.databaseDir("shop")))
+		require.NoError(t, a.makeDir(a.databaseDir("shop")))
+	})
+
+	t.Run("fails when a path component is a file", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "data"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "data", "shop"), []byte("x"), 0o644))
+		a, err := newFileAllocator(DataDir(dir))
+		require.NoError(t, err)
+
+		assert.Error(t, a.makeDir(a.databaseDir("shop")))
+	})
+}
+
+func TestFileAllocator_ids(t *testing.T) {
+	a, err := newFileAllocator(DataDir(t.TempDir()))
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(1), a.nextFileID())
+	assert.Equal(t, int64(2), a.nextFileID())
+	assert.Equal(t, filepath.Join(string(a.dataDir), "data", "shop", "7.tbl"), a.tablePath("shop", 7))
 }

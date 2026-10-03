@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"iter"
 	"os"
+	"path/filepath"
 )
 
 // RowID addresses a row by its page and slot. It stays valid for the row's
@@ -52,6 +53,11 @@ type sqlFile struct {
 func CreateFile(path string) (File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0644)
 	if err != nil {
+		return nil, fmt.Errorf("creating file %q: %w", path, err)
+	}
+	if err := SyncDir(filepath.Dir(path)); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
 		return nil, fmt.Errorf("creating file %q: %w", path, err)
 	}
 	return &sqlFile{file: f}, nil
