@@ -1,0 +1,91 @@
+name: Docker
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    name: Docker build and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: go-sql:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image runs as a non-root user
+        run: |
+          user=$(docker inspect -f '{{.Config.User}}' go-sql:ci)
+          echo "image user: ${user:-<unset>}"
+          if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "0" ]; then
+            echo "the image must not run as root"
+            exit 1
+          fi
+
+      - name: Start the container
+        run: docker run -d --name sqltest -p 50051:50051 -v sqltest-data:/data go-sql:ci
+
+      - name: Wait until the server listens
+        run: |
+          for _ in $(seq 1 40); do
+            if [ "$(docker inspect -f '{{.State.Running}}' sqltest)" != "true" ]; then
+              echo "the container exited before it started listening"
+              exit 1
+            fi
+            # A real HTTP/2 request, not just a TCP connect: Docker's port proxy
+            # accepts connections even when nothing answers behind it (for
+            # example a server bound to 127.0.0.1 inside the container). A gRPC
+            # server answers with some status; a dead upstream gives 000.
+            code=$(curl -s --http2-prior-knowledge -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:50051/ || true)
+            if docker logs sqltest 2>&1 | grep -q 'listening on' && [ "$code" != "000" ]; then
+              echo "server is listening (HTTP/2 status $code)"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "the server did not start listening within 20 seconds"
+          exit 1
+
+      - name: Stop with SIGTERM and require a clean exit
+        run: |
+          docker stop -t 10 sqltest
+          code=$(docker inspect -f '{{.State.ExitCode}}' sqltest)
+          echo "exit code: $code"
+          if [ "$code" != "0" ]; then
+            echo "expected a clean exit (0) after SIGTERM"
+            exit 1
+          fi
+          if ! docker logs sqltest 2>&1 | grep -q 'server stopped$'; then
+            echo "the server did not log a graceful stop"
+            exit 1
+          fi
+
+      - name: Container logs
+        if: always()
+        run: docker logs sqltest || true
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f sqltest || true
+          docker volume rm sqltest-data || true
