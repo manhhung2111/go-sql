@@ -116,17 +116,26 @@ A range of more than about 15 PRs is processed in chunks, with the marker advanc
 
 ## Rules shared by both skills
 
-- Never commit, push or open a PR. Opening the PR is `/create-pr`.
+- Never commit, push or open a PR. Opening the PR is `/create-pr` (or, for automated syncs, the CI workflow described under "CI automation").
 - Write only inside `.wiki/` and the single `CLAUDE.md` pointer line.
 - Idempotent: a second `/sync-wiki` with no new merges changes nothing.
 - Every factual claim traces to code, a comment, a commit or a PR.
+
+## CI automation (added after the first release)
+
+`.github/workflows/sync-wiki.yml` runs the sync on every push to `main` (and from the "Run workflow" button on `main`) and opens a PR with the result. The skills themselves still never commit, push or open a PR; the workflow hands those steps to `peter-evans/create-pull-request`, and the PR is reviewed by a human like any other.
+
+- The workflow does the deterministic skill steps in shell: the prerequisites and marker (step 1), listing and reading the PRs (steps 2-3), the log line (step 7) and the `check.sh` lint loop. Gemini (`gemini-3.8-flash`) does only the page edits (steps 4-5) and the `index.md` update (step 6), with file tools only: shell and web tools are excluded and the checkout holds no write credentials.
+- Commits whose subject starts with `docs(wiki):` are never ingested, and neither are commits that touch only `.wiki/`.
+- At most 15 commits are ingested per run. A backlog is continued by the next push to `main` or a manual run; merging the wiki PR does not retrigger the workflow.
+- PR titles, bodies, comments and diffs are untrusted input to the model. The prompt says so, the scope check rejects any change outside `.wiki/` and any change to `.wiki/check.sh`, and the PR body tells the reviewer to check new rationale against the linked PRs.
+- The PR is opened with `GITHUB_TOKEN`, so CI workflows do not run on it; `check.sh` has already passed in the job.
 
 ## Out of scope (YAGNI)
 
 - A standalone `/lint-wiki` or query skill. Lint runs inside sync, and agents query by reading `index.md`.
 - Embedding or vector search. `index.md` is enough at this size.
-- CI that enforces wiki freshness.
-- Auto-opening PRs for wiki changes.
+- CI that blocks merges when the wiki is stale. (A workflow that opens a sync PR after merges is in scope: see "CI automation".)
 
 ## Testing and verification
 
