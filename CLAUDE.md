@@ -72,3 +72,5 @@ Every change follows plan, then tests, then implementation. Do not skip a stage.
 4. Commit per task (Conventional Commits). The PR's test plan lists the tests that were seen failing first and any mutation checks.
 
 Exceptions, verified by running them instead of by a unit test: documentation, generated code (`*.pb.go`, `wire_gen.go`), and build/CI config (Dockerfile, workflows). The `superpowers:writing-plans` and `superpowers:test-driven-development` skills implement this loop; use them when available.
+
+Deeper architecture notes, decisions and a code map live in .wiki/index.md; read it first.
