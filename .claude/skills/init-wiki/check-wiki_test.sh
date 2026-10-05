@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# Tests for check-wiki.sh. Run: bash .claude/skills/init-wiki/check-wiki_test.sh
+set -u
+here="$(cd "$(dirname "$0")" && pwd)"
+script="$here/check-wiki.sh"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+pass=0
+fail=0
+out=""
+status=0
+
+# new_wiki NAME: build a valid repo under $tmp/NAME and print its wiki dir.
+new_wiki() {
+  local root="$tmp/$1"
+  mkdir -p "$root/internal/engine" "$root/.wiki/code" "$root/.wiki/subsystems" "$root/.wiki/decisions" "$root/.wiki/concepts"
+  touch "$root/internal/engine/catalogstore.go"
+  cat > "$root/.wiki/code/engine.md" <<'EOF'
+---
+title: internal/engine
+kind: code
+sources:
+  - internal/engine/
+  - pr: 14
+updated: 117c2f0
+---
+# internal/engine
+
+See [catalog persistence](../subsystems/catalog.md) and [Go](https://go.dev).
+EOF
+  cat > "$root/.wiki/subsystems/catalog.md" <<'EOF'
+---
+title: Catalog persistence
+kind: subsystem
+sources:
+  - internal/engine/catalogstore.go
+updated: 117c2f0
+---
+# Catalog persistence
+
+Code map: [engine](../code/engine.md#key-types). Decision: [commit point](../decisions/commit-point.md).
+EOF
+  cat > "$root/.wiki/decisions/commit-point.md" <<'EOF'
+---
+title: Catalog row is the commit point
+kind: decision
+status: accepted
+sources:
+  - internal/engine/catalogstore.go
+  - pr: 14
+updated: 117c2f0
+---
+# Catalog row is the commit point
+
+Rationale not recorded.
+EOF
+  cat > "$root/.wiki/index.md" <<'EOF'
+# Index
+
+- [internal/engine](code/engine.md): engine package map
+- [Catalog persistence](subsystems/catalog.md): how the catalog is stored
+- [Catalog row is the commit point](decisions/commit-point.md): DDL commit rule
+EOF
+  cat > "$root/.wiki/log.md" <<'EOF'
+# Log
+
+## [2026-10-05] init | through 117c2f0
+EOF
+  echo "$root/.wiki"
+}
+
+run() {
+  out="$(bash "$script" "$@" 2>&1)"
+  status=$?
+}
+
+expect_ok() { # NAME ARGS...
+  local name="$1"; shift
+  run "$@"
+  if [ "$status" -eq 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL %s: want exit 0, got %d\n%s\n' "$name" "$status" "$out"; fi
+}
+
+expect_fail() { # NAME SUBSTRING ARGS...
+  local name="$1" want="$2"; shift 2
+  run "$@"
+  if [ "$status" -ne 0 ] && printf '%s' "$out" | grep -qF -- "$want"; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1)); printf 'FAIL %s: want nonzero exit containing %q, got %d\n%s\n' "$name" "$want" "$status" "$out"
+  fi
+}
+
+# --- frontmatter and sources ---
+w="$(new_wiki valid)"
+expect_ok "valid wiki passes (directory source, pr entry, anchor, https link)" check "$w"
+
+w="$(new_wiki no-updated)"
+sed -i.bak '/^updated:/d' "$w/code/engine.md"
+expect_fail "missing updated key" "frontmatter missing updated" check "$w"
+
+w="$(new_wiki no-frontmatter)"
+printf '# just a heading\n' > "$w/code/engine.md"
+expect_fail "page without frontmatter" "missing frontmatter" check "$w"
+
+w="$(new_wiki bad-kind)"
+sed -i.bak 's/^kind: code/kind: blob/' "$w/code/engine.md"
+expect_fail "unknown kind" "kind must be" check "$w"
+
+w="$(new_wiki no-status)"
+sed -i.bak '/^status:/d' "$w/decisions/commit-point.md"
+expect_fail "decision without status" "needs status" check "$w"
+
+w="$(new_wiki bad-source)"
+sed -i.bak 's#internal/engine/catalogstore.go#internal/engine/gone.go#' "$w/subsystems/catalog.md"
+expect_fail "source path missing" 'source "internal/engine/gone.go" does not exist' check "$w"
+
+w="$(new_wiki inline-sources)"
+sed -i.bak 's#^sources:#sources: [internal/engine/]#; /^  - internal\/engine\/$/d' "$w/code/engine.md"
+expect_fail "inline sources list" "block list" check "$w"
+
+# --- links and index ---
+w="$(new_wiki dead-link)"
+sed -i.bak 's#(\.\./subsystems/catalog\.md)#(../subsystems/nope.md)#' "$w/code/engine.md"
+expect_fail "dead relative link" 'dead link "../subsystems/nope.md"' check "$w"
+
+w="$(new_wiki dead-anchor-target)"
+rm "$w/code/engine.md"
+sed -i.bak '/engine\.md/d' "$w/index.md"
+expect_fail "anchor link to a missing file" 'dead link "../code/engine.md#key-types"' check "$w"
+
+w="$(new_wiki unlisted)"
+cp "$w/code/engine.md" "$w/code/extra.md"
+expect_fail "page missing from index" "not listed in index.md" check "$w"
+
+w="$(new_wiki index-dead)"
+printf -- '- [Ghost](code/ghost.md): not there\n' >> "$w/index.md"
+expect_fail "index links to a missing page" 'dead link "code/ghost.md"' check "$w"
+
+w="$(new_wiki no-index)"
+rm "$w/index.md"
+expect_fail "missing index.md" "index.md: missing" check "$w"
+
+w="$(new_wiki no-log)"
+rm "$w/log.md"
+expect_fail "missing log.md" "log.md: missing" check "$w"
+
+# --- marker ---
+w="$(new_wiki marker-init)"
+run marker "$w"
+if [ "$status" -eq 0 ] && [ "$out" = "117c2f0" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL marker from init: got %d %q\n' "$status" "$out"; fi
+
+w="$(new_wiki marker-sync)"
+printf '## [2026-10-12] sync | 117c2f0..ab12cd3 | PRs #13 #14 | pages: 6\n' >> "$w/log.md"
+run marker "$w"
+if [ "$status" -eq 0 ] && [ "$out" = "ab12cd3" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL marker from newest sync (right-hand SHA): got %d %q\n' "$status" "$out"; fi
+
+w="$(new_wiki marker-nolog)"
+rm "$w/log.md"
+expect_fail "marker without log.md" "no log.md" marker "$w"
+if [ "$status" -ne 2 ]; then fail=$((fail + 1)); printf 'FAIL marker without log.md: want exit 2, got %d\n' "$status"; fi
+
+w="$(new_wiki marker-noentry)"
+printf '# Log\n\nnothing ingested yet\n' > "$w/log.md"
+expect_fail "marker with no entry" "no init or sync entry" marker "$w"
+
+expect_fail "marker on a nonexistent dir" "no log.md" marker "$tmp/does-not-exist"
+if printf '%s' "$out" | grep -q 'cd:'; then fail=$((fail + 1)); printf 'FAIL marker on a nonexistent dir leaks a cd error:\n%s\n' "$out"; fi
+
+# --- pages (changed path -> citing pages) ---
+tab="$(printf '\t')"
+
+run_stdin() { # INPUT ARGS...
+  local input="$1"; shift
+  out="$(printf '%s\n' "$input" | bash "$script" "$@" 2>&1)"
+  status=$?
+}
+
+expect_lines() { # NAME WANT_LINES (newline separated, any order)
+  local name="$1" want="$2"
+  if [ "$status" -eq 0 ] && [ "$(printf '%s\n' "$out" | sort)" = "$(printf '%s\n' "$want" | sort)" ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1)); printf 'FAIL %s: status %d, got:\n%s\nwant:\n%s\n' "$name" "$status" "$out" "$want"
+  fi
+}
+
+w="$(new_wiki pages)"
+run_stdin "internal/engine/table.go" pages "$w"
+expect_lines "path under a cited directory maps to that page only" "code/engine.md${tab}internal/engine/table.go"
+
+run_stdin "internal/engine/catalogstore.go" pages "$w"
+expect_lines "exact path and directory citations all match" "subsystems/catalog.md${tab}internal/engine/catalogstore.go
+code/engine.md${tab}internal/engine/catalogstore.go
+decisions/commit-point.md${tab}internal/engine/catalogstore.go"
+
+run_stdin "README.md" pages "$w"
+expect_lines "path no page cites is reported as uncited" "uncited${tab}README.md"
+
+run_stdin "internal/engine2/x.go" pages "$w"
+expect_lines "a directory citation does not match a sibling with the same prefix" "uncited${tab}internal/engine2/x.go"
+
+run_stdin "" pages "$w"
+expect_lines "empty input prints nothing" ""
+
+# --- review fixes: index forms, code in pages, directory source without slash ---
+w="$(new_wiki index-forms)"
+sed -i.bak -e 's|(code/engine.md)|(code/engine.md#key-types)|' -e 's|(subsystems/catalog.md)|(./subsystems/catalog.md)|' "$w/index.md"
+expect_ok "index entries with an anchor or a leading ./ still list the page" check "$w"
+
+w="$(new_wiki code-in-page)"
+cat >> "$w/code/engine.md" <<'EOF2'
+
+```go
+x := m[k](arg)
+```
+
+Use `f(a)` inline and a [titled link](../subsystems/catalog.md "Catalog").
+EOF2
+expect_ok "fenced code, inline code and a link title are not dead links" check "$w"
+
+w="$(new_wiki dir-no-slash)"
+sed -i.bak 's#^  - internal/engine/$#  - internal/engine#' "$w/code/engine.md"
+expect_ok "directory source without a trailing slash passes check" check "$w"
+run_stdin "internal/engine/table.go" pages "$w"
+expect_lines "directory source without a trailing slash still maps files under it" "code/engine.md${tab}internal/engine/table.go"
+
+# --- summary ---
+printf '%d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]
