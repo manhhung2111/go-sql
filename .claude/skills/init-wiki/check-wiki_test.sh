@@ -144,6 +144,25 @@ w="$(new_wiki no-log)"
 rm "$w/log.md"
 expect_fail "missing log.md" "log.md: missing" check "$w"
 
+# --- marker ---
+w="$(new_wiki marker-init)"
+run marker "$w"
+if [ "$status" -eq 0 ] && [ "$out" = "117c2f0" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL marker from init: got %d %q\n' "$status" "$out"; fi
+
+w="$(new_wiki marker-sync)"
+printf '## [2026-10-12] sync | 117c2f0..ab12cd3 | PRs #13 #14 | pages: 6\n' >> "$w/log.md"
+run marker "$w"
+if [ "$status" -eq 0 ] && [ "$out" = "ab12cd3" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL marker from newest sync (right-hand SHA): got %d %q\n' "$status" "$out"; fi
+
+w="$(new_wiki marker-nolog)"
+rm "$w/log.md"
+expect_fail "marker without log.md" "no log.md" marker "$w"
+if [ "$status" -ne 2 ]; then fail=$((fail + 1)); printf 'FAIL marker without log.md: want exit 2, got %d\n' "$status"; fi
+
+w="$(new_wiki marker-noentry)"
+printf '# Log\n\nnothing ingested yet\n' > "$w/log.md"
+expect_fail "marker with no entry" "no init or sync entry" marker "$w"
+
 # --- summary ---
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

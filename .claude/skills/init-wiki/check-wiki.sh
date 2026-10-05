@@ -83,7 +83,21 @@ run_check() {
   echo ok
 }
 
+# marker: print the SHA the wiki last ingested through (newest init/sync entry).
+marker() {
+  local last sha
+  [ -f "$wiki/log.md" ] || { echo "no log.md in $wiki" >&2; exit 2; }
+  last="$(grep -E '^## \[[0-9]{4}-[0-9]{2}-[0-9]{2}\] (init|sync) \|' "$wiki/log.md" | tail -n 1)"
+  [ -n "$last" ] || { echo "no init or sync entry in $wiki/log.md" >&2; exit 2; }
+  sha="$(printf '%s\n' "$last" | sed -nE \
+    -e 's/.*through ([0-9a-f]{7,40}).*/\1/p' \
+    -e 's/.*[0-9a-f]{7,40}\.\.([0-9a-f]{7,40}).*/\1/p')"
+  [ -n "$sha" ] || { echo "no SHA in log entry: $last" >&2; exit 2; }
+  printf '%s\n' "$sha"
+}
+
 case "$cmd" in
   check) run_check ;;
+  marker) marker ;;
   *) echo "usage: check-wiki.sh [check|marker] [WIKI_DIR]" >&2; exit 2 ;;
 esac
