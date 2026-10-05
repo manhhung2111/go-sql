@@ -6,7 +6,7 @@ set -u
 
 cmd="${1:-check}"
 wiki="${2:-$(cd "$(dirname "$0")" && pwd)}"
-repo="$(cd "$wiki/.." && pwd)"
+repo="$(cd "$wiki/.." 2>/dev/null && pwd)"
 errors=0
 
 err() { printf 'ERROR: %s: %s\n' "$1" "$2"; errors=$((errors + 1)); }

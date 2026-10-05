@@ -163,6 +163,9 @@ w="$(new_wiki marker-noentry)"
 printf '# Log\n\nnothing ingested yet\n' > "$w/log.md"
 expect_fail "marker with no entry" "no init or sync entry" marker "$w"
 
+expect_fail "marker on a nonexistent dir" "no log.md" marker "$tmp/does-not-exist"
+if printf '%s' "$out" | grep -q 'cd:'; then fail=$((fail + 1)); printf 'FAIL marker on a nonexistent dir leaks a cd error:\n%s\n' "$out"; fi
+
 # --- summary ---
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
