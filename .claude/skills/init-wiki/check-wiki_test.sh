@@ -202,6 +202,28 @@ expect_lines "a directory citation does not match a sibling with the same prefix
 run_stdin "" pages "$w"
 expect_lines "empty input prints nothing" ""
 
+# --- review fixes: index forms, code in pages, directory source without slash ---
+w="$(new_wiki index-forms)"
+sed -i.bak -e 's|(code/engine.md)|(code/engine.md#key-types)|' -e 's|(subsystems/catalog.md)|(./subsystems/catalog.md)|' "$w/index.md"
+expect_ok "index entries with an anchor or a leading ./ still list the page" check "$w"
+
+w="$(new_wiki code-in-page)"
+cat >> "$w/code/engine.md" <<'EOF2'
+
+```go
+x := m[k](arg)
+```
+
+Use `f(a)` inline and a [titled link](../subsystems/catalog.md "Catalog").
+EOF2
+expect_ok "fenced code, inline code and a link title are not dead links" check "$w"
+
+w="$(new_wiki dir-no-slash)"
+sed -i.bak 's#^  - internal/engine/$#  - internal/engine#' "$w/code/engine.md"
+expect_ok "directory source without a trailing slash passes check" check "$w"
+run_stdin "internal/engine/table.go" pages "$w"
+expect_lines "directory source without a trailing slash still maps files under it" "code/engine.md${tab}internal/engine/table.go"
+
 # --- summary ---
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

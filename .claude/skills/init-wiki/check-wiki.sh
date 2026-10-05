@@ -46,6 +46,12 @@ check_page() {
   done < <(sources_of "$file")
 }
 
+# link_targets FILE: print the target of every markdown link outside code
+# (fenced blocks and inline code spans are skipped), without any link title.
+link_targets() {
+  awk '/^```/ { f = !f; next } !f' "$1" | sed 's/`[^`]*`//g' | grep -oE '\]\([^)]+\)' | sed -e 's/^](//' -e 's/)$//' -e 's/ .*//'
+}
+
 # check_links FILE: every relative markdown link must resolve; anchors are
 # stripped, external and in-page links are ignored.
 check_links() {
@@ -55,7 +61,7 @@ check_links() {
     case "$target" in http://*|https://*|mailto:*|\#*) continue ;; esac
     path="${target%%#*}"
     [ -e "$dir/$path" ] || err "$rel" "dead link \"$target\""
-  done < <(grep -oE '\]\([^)]+\)' "$file" | sed -e 's/^](//' -e 's/)$//')
+  done < <(link_targets "$file")
 }
 
 # check_index: every page in a kind folder must be linked from index.md.
@@ -67,7 +73,7 @@ check_index() {
     for file in "$wiki/$dir"/*.md; do
       [ -e "$file" ] || continue
       rel="${file#$wiki/}"
-      grep -qF "]($rel)" "$wiki/index.md" || err "$rel" "not listed in index.md"
+      link_targets "$wiki/index.md" | sed -e 's/#.*//' -e 's#^\./##' | grep -qxF "$rel" || err "$rel" "not listed in index.md"
     done
   done
 }
@@ -113,8 +119,9 @@ pages() {
     for page in "$wiki"/subsystems/*.md "$wiki"/code/*.md "$wiki"/decisions/*.md "$wiki"/concepts/*.md; do
       [ -e "$page" ] || continue
       while IFS= read -r src; do
+        case "$src" in pr:*) continue ;; esac
+        if [ -d "$repo/$src" ]; then src="${src%/}/"; fi
         case "$src" in
-          pr:*) continue ;;
           */) case "$path" in "$src"*) hit=1; printf '%s\t%s\n' "${page#$wiki/}" "$path"; break ;; esac ;;
           *) if [ "$path" = "$src" ]; then hit=1; printf '%s\t%s\n' "${page#$wiki/}" "$path"; break; fi ;;
         esac
