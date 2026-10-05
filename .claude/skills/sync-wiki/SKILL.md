@@ -30,6 +30,10 @@ Brings `.wiki/` up to date with `main`. It edits the working tree and proposes a
 
 7. **Log and hand back.** New marker: `new="$(git rev-parse --short=7 <last-commit-of-this-chunk>)"`. Append `## [YYYY-MM-DD] sync | <marker-short>..<new> | PRs #N #N | pages: <count touched>` to `.wiki/log.md` (an append, never an edit). Print a summary (PRs ingested, pages touched, anything thin), propose the commit message `docs(wiki): sync through <new>`, and **ask before committing**. End the commit message with `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 
+## CI
+
+`.github/workflows/sync-wiki.yml` runs this skill unattended after pushes to `main`: the workflow does steps 1-3, the log line and the lint loop in shell, a model does steps 4-5 and the `index.md` part of step 6, and `peter-evans/create-pull-request` commits and opens the PR. The "never commit, push or open a PR" rule below applies to you when you run this skill interactively; the workflow is the deliberate exception. If you change the steps above, keep the workflow and its prompt in step.
+
 ## Never
 
 - Commit, push or open a PR (that is `/create-pr`).
