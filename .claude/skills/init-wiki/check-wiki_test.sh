@@ -118,6 +118,32 @@ w="$(new_wiki inline-sources)"
 sed -i.bak 's#^sources:#sources: [internal/engine/]#; /^  - internal\/engine\/$/d' "$w/code/engine.md"
 expect_fail "inline sources list" "block list" check "$w"
 
+# --- links and index ---
+w="$(new_wiki dead-link)"
+sed -i.bak 's#(\.\./subsystems/catalog\.md)#(../subsystems/nope.md)#' "$w/code/engine.md"
+expect_fail "dead relative link" 'dead link "../subsystems/nope.md"' check "$w"
+
+w="$(new_wiki dead-anchor-target)"
+rm "$w/code/engine.md"
+sed -i.bak '/engine\.md/d' "$w/index.md"
+expect_fail "anchor link to a missing file" 'dead link "../code/engine.md#key-types"' check "$w"
+
+w="$(new_wiki unlisted)"
+cp "$w/code/engine.md" "$w/code/extra.md"
+expect_fail "page missing from index" "not listed in index.md" check "$w"
+
+w="$(new_wiki index-dead)"
+printf -- '- [Ghost](code/ghost.md): not there\n' >> "$w/index.md"
+expect_fail "index links to a missing page" 'dead link "code/ghost.md"' check "$w"
+
+w="$(new_wiki no-index)"
+rm "$w/index.md"
+expect_fail "missing index.md" "index.md: missing" check "$w"
+
+w="$(new_wiki no-log)"
+rm "$w/log.md"
+expect_fail "missing log.md" "log.md: missing" check "$w"
+
 # --- summary ---
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

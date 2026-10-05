@@ -40,6 +40,32 @@ check_page() {
   done < <(printf '%s\n' "$fm" | awk '/^sources:/ { s = 1; next } /^[^ ]/ { s = 0 } s && /^  - / { sub(/^  - /, ""); print }')
 }
 
+# check_links FILE: every relative markdown link must resolve; anchors are
+# stripped, external and in-page links are ignored.
+check_links() {
+  local file="$1" rel="${1#$wiki/}" dir target path
+  dir="$(dirname "$file")"
+  while IFS= read -r target; do
+    case "$target" in http://*|https://*|mailto:*|\#*) continue ;; esac
+    path="${target%%#*}"
+    [ -e "$dir/$path" ] || err "$rel" "dead link \"$target\""
+  done < <(grep -oE '\]\([^)]+\)' "$file" | sed -e 's/^](//' -e 's/)$//')
+}
+
+# check_index: every page in a kind folder must be linked from index.md.
+check_index() {
+  local dir file rel
+  [ -f "$wiki/index.md" ] || { err index.md "missing"; return; }
+  for dir in subsystems code decisions concepts; do
+    [ -d "$wiki/$dir" ] || continue
+    for file in "$wiki/$dir"/*.md; do
+      [ -e "$file" ] || continue
+      rel="${file#$wiki/}"
+      grep -qF "]($rel)" "$wiki/index.md" || err "$rel" "not listed in index.md"
+    done
+  done
+}
+
 run_check() {
   local dir file
   for dir in subsystems code decisions concepts; do
@@ -47,8 +73,12 @@ run_check() {
     for file in "$wiki/$dir"/*.md; do
       [ -e "$file" ] || continue
       check_page "$file"
+      check_links "$file"
     done
   done
+  [ -f "$wiki/index.md" ] && check_links "$wiki/index.md"
+  check_index
+  [ -f "$wiki/log.md" ] || err log.md "missing"
   if [ "$errors" -gt 0 ]; then printf '%d problem(s)\n' "$errors"; exit 1; fi
   echo ok
 }
