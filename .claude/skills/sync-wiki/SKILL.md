@@ -22,7 +22,7 @@ Brings `.wiki/` up to date with `main`. It edits the working tree and proposes a
 
 3. **Read each PR.** The diff (`git show <sha>`), the commit message, and `gh pr view N --json title,body,comments,reviews`. Bound network calls. If `gh` is unavailable or unauthenticated, continue with git only and say rationale may be thin.
 
-4. **Map changes to pages.** For every changed path, find pages whose `sources:` cite it or its directory (`grep -rl` over `.wiki/` frontmatter). A changed file no page cites means a new page or an extended one. A removed file means its pages are updated or marked stale.
+4. **Map changes to pages.** Pipe the changed paths into `.wiki/check.sh pages` (for example `git diff-tree --no-commit-id --name-only -r -m --first-parent <sha> | .wiki/check.sh pages`). It prints `<page><TAB><path>` for every page whose `sources:` cite the path, exactly or as a directory, and `uncited<TAB><path>` for a path no page cites. Do not hand-roll this with `grep`: a plain grep misses pages that cite a directory such as `internal/engine/`. An `uncited` path means a new page or an extended one. A removed file means its pages are updated or marked stale.
 
 5. **Update pages.** Edit only the affected pages and fix cross-links. Set `updated:` to the new marker SHA on every page you touch. A PR that reverses a decision: set that decision's `status: superseded`, add `Superseded by`, and write the new decision page; never delete a decision. A PR that only touches tests or formatting is logged and touches no pages. Where a PR's rationale is not recorded, say so on the page and never invent it.
 

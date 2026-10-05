@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # check-wiki.sh: validate a .wiki/ directory, or print its last-ingested marker.
-# usage: check-wiki.sh [check|marker] [WIKI_DIR]
+# usage: check-wiki.sh [check|marker|pages] [WIKI_DIR]
+# pages reads changed repo paths on stdin and prints the pages whose sources cite them.
 # WIKI_DIR defaults to the directory containing this script (.wiki/check.sh).
 set -u
 
@@ -14,6 +15,11 @@ err() { printf 'ERROR: %s: %s\n' "$1" "$2"; errors=$((errors + 1)); }
 # frontmatter FILE: print the lines between the opening and closing ---.
 frontmatter() {
   awk 'NR == 1 { if ($0 != "---") exit; next } $0 == "---" { exit } { print }' "$1"
+}
+
+# sources_of FILE: print the entries of a page's block-list sources, one per line.
+sources_of() {
+  frontmatter "$1" | awk '/^sources:/ { s = 1; next } /^[^ ]/ { s = 0 } s && /^  - / { sub(/^  - /, ""); print }'
 }
 
 check_page() {
@@ -37,7 +43,7 @@ check_page() {
   while IFS= read -r src; do
     case "$src" in pr:*) continue ;; esac
     [ -e "$repo/$src" ] || err "$rel" "source \"$src\" does not exist"
-  done < <(printf '%s\n' "$fm" | awk '/^sources:/ { s = 1; next } /^[^ ]/ { s = 0 } s && /^  - / { sub(/^  - /, ""); print }')
+  done < <(sources_of "$file")
 }
 
 # check_links FILE: every relative markdown link must resolve; anchors are
@@ -96,8 +102,31 @@ marker() {
   printf '%s\n' "$sha"
 }
 
+# pages: read changed repo paths on stdin; print "<page><TAB><path>" for every
+# page whose sources cite the path (exactly, or as a directory ending in /),
+# and "uncited<TAB><path>" for a path no page cites.
+pages() {
+  local path page src hit
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    hit=0
+    for page in "$wiki"/subsystems/*.md "$wiki"/code/*.md "$wiki"/decisions/*.md "$wiki"/concepts/*.md; do
+      [ -e "$page" ] || continue
+      while IFS= read -r src; do
+        case "$src" in
+          pr:*) continue ;;
+          */) case "$path" in "$src"*) hit=1; printf '%s\t%s\n' "${page#$wiki/}" "$path"; break ;; esac ;;
+          *) if [ "$path" = "$src" ]; then hit=1; printf '%s\t%s\n' "${page#$wiki/}" "$path"; break; fi ;;
+        esac
+      done < <(sources_of "$page")
+    done
+    [ "$hit" -eq 1 ] || printf 'uncited\t%s\n' "$path"
+  done
+}
+
 case "$cmd" in
   check) run_check ;;
   marker) marker ;;
-  *) echo "usage: check-wiki.sh [check|marker] [WIKI_DIR]" >&2; exit 2 ;;
+  pages) pages ;;
+  *) echo "usage: check-wiki.sh [check|marker|pages] [WIKI_DIR]" >&2; exit 2 ;;
 esac

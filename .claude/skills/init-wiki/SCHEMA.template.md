@@ -11,7 +11,7 @@ Maintained by two skills: `/init-wiki` (one-off build) and `/sync-wiki` (ingest 
   index.md        every page, one line each, grouped by kind
   log.md          append-only record of init/sync runs; holds the marker
   SCHEMA.md       this file
-  check.sh        validator (`check`) and marker reader (`marker`)
+  check.sh        validator (`check`), marker reader (`marker`), changed-path mapper (`pages`)
   subsystems/     one narrative page per layer
   code/           one map page per package
   decisions/      one page per significant "why"
@@ -81,7 +81,7 @@ The marker is the SHA after `through`, or the right-hand SHA of `..`, in the new
 ## Ingest rules (used by /sync-wiki)
 
 - Range: `git log --first-parent <marker>..<main>`, one squash commit per PR. Skip commits that touch only `.wiki/`.
-- Map each PR's changed paths to pages by their `sources:`. A changed file no page cites means a new or extended page. A removed file means its pages are updated or marked stale.
+- Map each PR's changed paths to pages by their `sources:`: pipe the paths into `.wiki/check.sh pages`, which prints `<page><TAB><path>` for every page citing a path (exactly, or as a directory ending in `/`) and `uncited<TAB><path>` for a path no page cites. A changed file no page cites means a new or extended page. A removed file means its pages are updated or marked stale.
 - Edit only affected pages and fix cross-links. PRs that only touch tests or formatting are logged and touch no pages.
 - Update `updated:` on every touched page, update `index.md`, append the `sync` entry.
 - Process more than about 15 PRs in chunks, advancing the marker per chunk.

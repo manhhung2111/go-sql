@@ -166,6 +166,42 @@ expect_fail "marker with no entry" "no init or sync entry" marker "$w"
 expect_fail "marker on a nonexistent dir" "no log.md" marker "$tmp/does-not-exist"
 if printf '%s' "$out" | grep -q 'cd:'; then fail=$((fail + 1)); printf 'FAIL marker on a nonexistent dir leaks a cd error:\n%s\n' "$out"; fi
 
+# --- pages (changed path -> citing pages) ---
+tab="$(printf '\t')"
+
+run_stdin() { # INPUT ARGS...
+  local input="$1"; shift
+  out="$(printf '%s\n' "$input" | bash "$script" "$@" 2>&1)"
+  status=$?
+}
+
+expect_lines() { # NAME WANT_LINES (newline separated, any order)
+  local name="$1" want="$2"
+  if [ "$status" -eq 0 ] && [ "$(printf '%s\n' "$out" | sort)" = "$(printf '%s\n' "$want" | sort)" ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1)); printf 'FAIL %s: status %d, got:\n%s\nwant:\n%s\n' "$name" "$status" "$out" "$want"
+  fi
+}
+
+w="$(new_wiki pages)"
+run_stdin "internal/engine/table.go" pages "$w"
+expect_lines "path under a cited directory maps to that page only" "code/engine.md${tab}internal/engine/table.go"
+
+run_stdin "internal/engine/catalogstore.go" pages "$w"
+expect_lines "exact path and directory citations all match" "subsystems/catalog.md${tab}internal/engine/catalogstore.go
+code/engine.md${tab}internal/engine/catalogstore.go
+decisions/commit-point.md${tab}internal/engine/catalogstore.go"
+
+run_stdin "README.md" pages "$w"
+expect_lines "path no page cites is reported as uncited" "uncited${tab}README.md"
+
+run_stdin "internal/engine2/x.go" pages "$w"
+expect_lines "a directory citation does not match a sibling with the same prefix" "uncited${tab}internal/engine2/x.go"
+
+run_stdin "" pages "$w"
+expect_lines "empty input prints nothing" ""
+
 # --- summary ---
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
