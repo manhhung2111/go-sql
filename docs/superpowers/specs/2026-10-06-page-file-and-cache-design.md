@@ -42,8 +42,11 @@ type PageFile interface {
     ReadPage(n int32) ([]byte, error)
     // WritePage stamps page number n and the checksum into a copy of buf and
     // writes it through. It does not fsync. buf must be exactly one page.
+    // n may be NumPages(), which appends the page; n beyond that is an error.
     WritePage(n int32, buf []byte) error
-    // AllocatePage appends a blank, valid page and returns its number.
+    // AllocatePage appends an all-zero payload page with a valid header and
+    // returns its number. It is for owners whose blank page is valid (the
+    // index); the heap appends with WritePage instead.
     AllocatePage() (int32, error)
     NumPages() int32
     Sync() error
@@ -55,7 +58,8 @@ func OpenPageFile(path string) (PageFile, error)   // rejects a size that is not
 ```
 
 - Same concurrency contract as `File`: any number of `ReadPage` calls may run concurrently (`ReadAt` is a `pread`); `WritePage`, `AllocatePage`, `Sync` and `Close` need exclusive access from the owner.
-- `AllocatePage` writes a valid blank page instead of truncate-extending. A torn allocation leaves a file whose size is not a whole number of pages, which `OpenPageFile` already rejects.
+- `AllocatePage` writes a page with a stamped header and an all-zero payload instead of truncate-extending. A torn append (from `AllocatePage` or from `WritePage(NumPages(), …)`) leaves a file whose size is not a whole number of pages, which `OpenPageFile` already rejects, and `NumPages` only advances after a successful write.
+- The heap cannot use `AllocatePage`: an all-zero payload is not a valid slotted page (its data start would be 0), and a separate allocate-then-write would add a second write and a crash window per new page. It appends with `WritePage(NumPages(), page)`, exactly the one write it does today.
 - `ReadPage` of a number outside `[0, NumPages())` is an error naming the page and the range.
 - Error wording follows the repo convention: lowercase, no trailing punctuation, `reading page %d: ...`.
 
@@ -104,7 +108,7 @@ func NewCachedPageFile(inner PageFile, capacity int) (PageFile, error) // capaci
 Pure Go with `testify`, in `internal/storage`. Every test is seen failing first.
 
 - **Page file:** create/open (existing file refused, torn size refused), allocate then read a blank page, write then read round-trip, out-of-range read and write, corrupt checksum, wrong page number, a failed write (read-only file) reported, concurrent readers under `-race`.
-- **Heap refactor:** the existing `file_test.go` and `page_test.go` suites pass unchanged. That is the regression net for the refactor.
+- **Heap refactor:** the existing `file_test.go` and `page_test.go` suites are the regression net. They pass with one change: the helper in `TestSqlFile_FailedWriteDropsTailCache` that swaps the file handle to a read-only one now swaps the page file's handle. New tests also pin the format: a heap file opens as a `PageFile` and reads back, and a page written through `PageFile` scans as heap rows.
 - **Cache:** a hit does not call `inner` (counting fake `PageFile`); LRU order and eviction; a failed write drops the entry; a corrupt page is not cached; a buffer held across eviction stays intact; concurrent `ReadPage` under `-race`; `capacity < 1` is rejected.
 - **Mutation checks** for the plan's test list: keep the cache write-through, then skip the drop-on-failure, then recycle a buffer, and confirm a test fails each time.
 - `go test -race ./...`, `go vet ./...` and `gofmt -l .` stay clean.
