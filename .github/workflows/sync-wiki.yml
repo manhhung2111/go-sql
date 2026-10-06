@@ -221,10 +221,22 @@ jobs:
         if: steps.collect.outputs.skip == 'false'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Headless Gemini refuses to start in an untrusted folder (exit 55) and a fresh
+          # CI checkout is untrusted. It also downgrades --approval-mode to "default"
+          # there, so without this it could never edit files. The checkout is our own main.
+          GEMINI_CLI_TRUST_WORKSPACE: "true"
         run: |
+          # Without pipefail, tee's exit status hides a failing gemini and the job goes green.
+          set -o pipefail
           # auto_edit: may read, search and edit files; shell and web tools are excluded above.
           gemini -m "$GEMINI_MODEL" --approval-mode=auto_edit \
             -p "Carry out the task described in the input." < /tmp/prompt.md | tee /tmp/gemini.out
+
+          # A run that did the work prints a reply; silence means it never started.
+          if [ ! -s /tmp/gemini.out ]; then
+            echo "::error::Gemini produced no output; nothing was ingested"
+            exit 1
+          fi
 
           if grep -q '^BLOCKED:' /tmp/gemini.out; then
             echo "::error::$(grep '^BLOCKED:' /tmp/gemini.out | head -1)"
@@ -236,6 +248,7 @@ jobs:
         if: steps.collect.outputs.skip == 'false'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_CLI_TRUST_WORKSPACE: "true" # see the Run Gemini step
         run: |
           for attempt in 1 2 3; do
             set +e; out="$(bash .wiki/check.sh 2>&1)"; set -e
@@ -263,10 +276,15 @@ jobs:
 
       # ---- Skill step 7 (log line), after lint so the page count is final ---
       - name: Append log entry
+        id: log
         if: steps.collect.outputs.skip == 'false'
         run: |
           touched="$(git status --porcelain --untracked-files=all -- .wiki \
             | awk '$2 != ".wiki/log.md"' | wc -l | tr -d ' ')"
+          echo "pages=$touched" >> "$GITHUB_OUTPUT"
+          if [ "$touched" -eq 0 ]; then
+            echo "::warning::Gemini changed no wiki pages for PRs ${{ steps.collect.outputs.prs }}; the PR will only move the marker"
+          fi
           echo "## [$(date -u +%F)] sync | ${{ steps.collect.outputs.old }}..${{ steps.collect.outputs.new }} | PRs ${{ steps.collect.outputs.prs }} | pages: $touched" \
             >> .wiki/log.md
           tail -n 3 .wiki/log.md
@@ -311,6 +329,7 @@ jobs:
             - Range: `${{ steps.collect.outputs.old }}..${{ steps.collect.outputs.new }}`
             - Commits ingested: ${{ steps.collect.outputs.count }}
             - PRs: ${{ steps.collect.outputs.prs }}
+            - Wiki pages changed: ${{ steps.log.outputs.pages }} (0 means Gemini wrote nothing: do not merge unless the PRs really need no wiki change)
             - Commits not yet ingested: up to ${{ steps.collect.outputs.remaining }} (merge this PR, then run the workflow again)
 
             The skill forbids claims that can't be traced to code, a comment, a commit or a PR,
