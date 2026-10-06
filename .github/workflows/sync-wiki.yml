@@ -32,6 +32,8 @@ concurrency:
 
 env:
   GEMINI_MODEL: gemini-3.8-flash
+  GEMINI_FALLBACK_MODEL: gemini-3.5-flash   # tried once if the first model fails (e.g. 503 high demand)
+  GEMINI_TIMEOUT_SECONDS: 600               # per attempt; the CLI's own retries stop after a few minutes
   GEMINI_CLI_VERSION: 0.62.0
   SKILL_PATH: .claude/skills/sync-wiki/SKILL.md
   MAX_PRS: 15                    # same chunk size as the skill
@@ -43,6 +45,7 @@ jobs:
     # against the default branch.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -218,6 +221,7 @@ jobs:
           wc -c /tmp/prompt.md
 
       - name: Run Gemini (skill steps 4-6)
+        id: gemini
         if: steps.collect.outputs.skip == 'false'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -228,16 +232,37 @@ jobs:
         run: |
           # Without pipefail, tee's exit status hides a failing gemini and the job goes green.
           set -o pipefail
-          # auto_edit: may read, search and edit files; shell and web tools are excluded above.
-          gemini -m "$GEMINI_MODEL" --approval-mode=auto_edit \
-            -p "Carry out the task described in the input." < /tmp/prompt.md | tee /tmp/gemini.out
 
-          # A run that did the work prints a reply; silence means it never started.
-          if [ ! -s /tmp/gemini.out ]; then
-            echo "::error::Gemini produced no output; nothing was ingested"
+          used=""
+          for model in "$GEMINI_MODEL" "$GEMINI_FALLBACK_MODEL"; do
+            echo "::group::Gemini $model"
+            # auto_edit: may read, search and edit files; shell and web tools are excluded above.
+            set +e
+            timeout "$GEMINI_TIMEOUT_SECONDS" gemini -m "$model" --approval-mode=auto_edit \
+              -p "Carry out the task described in the input." < /tmp/prompt.md | tee /tmp/gemini.out
+            code=$?
+            set -e
+            echo "::endgroup::"
+
+            # A run that did the work exits 0 and prints a reply; anything else (a 503
+            # after the CLI's retries, a timeout, silence) means it did not.
+            if [ "$code" -eq 0 ] && [ -s /tmp/gemini.out ]; then
+              used="$model"
+              break
+            fi
+            echo "::warning::Gemini model $model failed (exit $code, $(wc -c < /tmp/gemini.out | tr -d ' ') bytes of output)"
+            # Start the next model from a clean wiki, not from a half-finished edit.
+            git checkout -q -- .wiki
+            git clean -fdq -- .wiki
+          done
+
+          if [ -z "$used" ]; then
+            echo "::error::No Gemini model produced a result ($GEMINI_MODEL, then $GEMINI_FALLBACK_MODEL); nothing was ingested"
             exit 1
           fi
+          echo "model=$used" >> "$GITHUB_OUTPUT"
 
+          # BLOCKED is a normal reply, not a failure to run: do not fall back to another model.
           if grep -q '^BLOCKED:' /tmp/gemini.out; then
             echo "::error::$(grep '^BLOCKED:' /tmp/gemini.out | head -1)"
             exit 1
@@ -245,10 +270,12 @@ jobs:
 
       # ---- Skill step 6 lint loop ------------------------------------------
       - name: Lint, letting Gemini fix problems
+        id: lint
         if: steps.collect.outputs.skip == 'false'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_CLI_TRUST_WORKSPACE: "true" # see the Run Gemini step
+          MODEL: ${{ steps.gemini.outputs.model }}
         run: |
           for attempt in 1 2 3; do
             set +e; out="$(bash .wiki/check.sh 2>&1)"; set -e
@@ -268,7 +295,7 @@ jobs:
               echo '```'
               echo "$out"
               echo '```'
-            } | gemini -m "$GEMINI_MODEL" --approval-mode=auto_edit \
+            } | timeout "$GEMINI_TIMEOUT_SECONDS" gemini -m "$MODEL" --approval-mode=auto_edit \
                   -p "Fix the problems described in the input."
           done
           echo "::error::.wiki/check.sh still failing after 2 fix attempts"
@@ -313,6 +340,7 @@ jobs:
 
       # ---- The commit + PR that the skill hands off ------------------------
       - name: Open or update PR
+        id: pr
         if: steps.collect.outputs.skip == 'false'
         # pinned to a commit: this action runs with a write token (v7.0.11)
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676
@@ -324,7 +352,7 @@ jobs:
           commit-message: "docs(wiki): sync through ${{ steps.collect.outputs.new }}"
           title: "docs(wiki): sync through ${{ steps.collect.outputs.new }}"
           body: |
-            Automated `/sync-wiki` run (Gemini `${{ env.GEMINI_MODEL }}`, in CI).
+            Automated `/sync-wiki` run (Gemini `${{ steps.gemini.outputs.model }}`, in CI).
 
             - Range: `${{ steps.collect.outputs.old }}..${{ steps.collect.outputs.new }}`
             - Commits ingested: ${{ steps.collect.outputs.count }}
@@ -337,3 +365,56 @@ jobs:
 
             This PR is opened with `GITHUB_TOKEN`, so CI workflows do not run on it; `.wiki/check.sh` already passed in the job.
           labels: documentation, automated
+
+      # ---- One place on the run page that says what this run did -----------
+      - name: Job summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          MARKER: ${{ steps.marker.outputs.marker }}
+          SKIP: ${{ steps.collect.outputs.skip }}
+          OLD: ${{ steps.collect.outputs.old }}
+          NEW: ${{ steps.collect.outputs.new }}
+          PRS: ${{ steps.collect.outputs.prs }}
+          REMAINING: ${{ steps.collect.outputs.remaining }}
+          MODEL: ${{ steps.gemini.outputs.model }}
+          PAGES: ${{ steps.log.outputs.pages }}
+          PR_URL: ${{ steps.pr.outputs.pull-request-url }}
+          GEMINI_OUTCOME: ${{ steps.gemini.outcome }}
+          LINT_OUTCOME: ${{ steps.lint.outcome }}
+        run: |
+          {
+            echo "## sync-wiki"
+            echo
+            if [ "$JOB_STATUS" != "success" ]; then
+              echo "**Failed** (job $JOB_STATUS), nothing was ingested. See the annotations above and the failing step's log."
+              if [ "$GEMINI_OUTCOME" = "failure" ]; then
+                echo "- The Gemini step failed: no model produced a result."
+              fi
+              if [ "$LINT_OUTCOME" = "failure" ]; then
+                echo "- \`check.sh\` still failed after Gemini's fix attempts."
+              fi
+            elif [ "$SKIP" != "false" ]; then
+              echo "**Nothing to ingest.** No new PRs since marker \`${MARKER:-unknown}\`."
+            else
+              echo "**Ingested** \`$OLD..$NEW\`"
+              echo
+              echo "| | |"
+              echo "|---|---|"
+              echo "| PRs | $PRS |"
+              if [ "$MODEL" = "$GEMINI_MODEL" ]; then
+                echo "| Model | \`$MODEL\` |"
+              else
+                echo "| Model | \`$MODEL\` (fallback: \`$GEMINI_MODEL\` failed) |"
+              fi
+              echo "| Wiki pages changed | $PAGES |"
+              echo "| Not yet ingested | ${REMAINING:-0} |"
+              if [ -n "$PR_URL" ]; then
+                echo "| Pull request | $PR_URL |"
+              fi
+              if [ "$PAGES" = "0" ]; then
+                echo
+                echo "> No wiki page changed: do not merge the PR unless these PRs really need no wiki change."
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
