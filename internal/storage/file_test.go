@@ -363,6 +363,51 @@ func TestSqlFile_Sync(t *testing.T) {
 	assert.NoError(t, f.Sync())
 }
 
+// The heap's pages and a PageFile's pages are the same bytes: a heap file
+// opens as a PageFile, and a heap page written through a PageFile scans as rows.
+func TestSqlFile_OnDiskFormatIsUnchanged(t *testing.T) {
+	t.Run("a heap file opens and reads as a PageFile", func(t *testing.T) {
+		f, path := newTestFile(t)
+		_, err := f.Insert([]byte("one"))
+		require.NoError(t, err)
+		_, err = f.Insert(make([]byte, maxRowSize)) // too big to share a page: a second page
+		require.NoError(t, err)
+		require.NoError(t, f.Sync())
+		require.NoError(t, f.Close())
+
+		pf, err := OpenPageFile(path)
+		require.NoError(t, err)
+		defer func() { _ = pf.Close() }()
+
+		assert.Equal(t, int32(2), pf.NumPages())
+		buf, err := pf.ReadPage(0)
+		require.NoError(t, err)
+		page, err := DecodePage(buf)
+		require.NoError(t, err)
+		row, live := page.Row(0)
+		assert.True(t, live)
+		assert.Equal(t, []byte("one"), row)
+	})
+
+	t.Run("a heap page written through a PageFile scans as heap rows", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "table.tbl")
+		pf, err := CreatePageFile(path)
+		require.NoError(t, err)
+		page := NewPage(0)
+		_, err = page.InsertRow([]byte("written-by-pagefile"))
+		require.NoError(t, err)
+		require.NoError(t, pf.WritePage(0, page.Encode()))
+		require.NoError(t, pf.Sync())
+		require.NoError(t, pf.Close())
+
+		f, err := OpenFile(path)
+		require.NoError(t, err)
+		defer func() { _ = f.Close() }()
+
+		assert.Equal(t, []string{"written-by-pagefile"}, rowStrings(scanAll(t, f)))
+	})
+}
+
 // A write that fails must not leave the cached tail page holding a change
 // that never reached disk, or the next successful write would flush it.
 func TestSqlFile_FailedWriteDropsTailCache(t *testing.T) {
@@ -370,15 +415,15 @@ func TestSqlFile_FailedWriteDropsTailCache(t *testing.T) {
 	// every write inside it fails.
 	failWrites := func(t *testing.T, f File, path string, fn func()) {
 		t.Helper()
-		sf := f.(*sqlFile)
-		readWrite := sf.file
+		pf := f.(*sqlFile).pages.(*osPageFile)
+		readWrite := pf.file
 		readOnly, err := os.Open(path)
 		require.NoError(t, err)
 		defer func() { _ = readOnly.Close() }()
 
-		sf.file = readOnly
+		pf.file = readOnly
 		fn()
-		sf.file = readWrite
+		pf.file = readWrite
 	}
 
 	t.Run("insert", func(t *testing.T) {

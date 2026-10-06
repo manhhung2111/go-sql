@@ -3,8 +3,6 @@ package storage
 import (
 	"fmt"
 	"iter"
-	"os"
-	"path/filepath"
 )
 
 // RowID addresses a row by its page and slot. It stays valid for the row's
@@ -41,8 +39,7 @@ type File interface {
 }
 
 type sqlFile struct {
-	file     *os.File
-	numPages int32
+	pages PageFile
 	// tail caches the last page. Every write goes straight to disk, so the
 	// cache always equals what is on disk; it is nil when not loaded.
 	tail Page
@@ -51,70 +48,43 @@ type sqlFile struct {
 // CreateFile makes a new, empty heap file. It fails if path already exists,
 // so a new table can never silently pick up an old file's rows.
 func CreateFile(path string) (File, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0644)
+	pages, err := CreatePageFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("creating file %q: %w", path, err)
+		return nil, err
 	}
-	if err := SyncDir(filepath.Dir(path)); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return nil, fmt.Errorf("creating file %q: %w", path, err)
-	}
-	return &sqlFile{file: f}, nil
+	return &sqlFile{pages: pages}, nil
 }
 
 // OpenFile opens an existing heap file. A size that is not a whole number of
 // pages means a torn or corrupt file.
 func OpenFile(path string) (File, error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	pages, err := OpenPageFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("opening file %q: %w", path, err)
+		return nil, err
 	}
-
-	info, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("stat file %q: %w", path, err)
-	}
-	if info.Size()%maxPageSize != 0 {
-		_ = f.Close()
-		return nil, fmt.Errorf("file %q is %d bytes, not a multiple of the %d-byte page size (torn or corrupt)", path, info.Size(), maxPageSize)
-	}
-
-	return &sqlFile{file: f, numPages: int32(info.Size() / maxPageSize)}, nil
+	return &sqlFile{pages: pages}, nil
 }
 
-func (f *sqlFile) readPage(pageNumber int32) (Page, error) {
-	buf := make([]byte, maxPageSize)
-	// ReadAt may return io.EOF alongside a full read at the end of the file.
-	if n, err := f.file.ReadAt(buf, int64(pageNumber)*maxPageSize); n != len(buf) && err != nil {
-		return nil, fmt.Errorf("reading page %d: %w", pageNumber, err)
-	}
-
-	page, err := DecodePage(buf)
+// readPage returns page n as a private, mutable copy: the page file's buffer
+// is read-only, and the tail and Delete paths change the page they read.
+func (f *sqlFile) readPage(n int32) (Page, error) {
+	buf, err := f.pages.ReadPage(n)
 	if err != nil {
-		return nil, fmt.Errorf("page %d: %w", pageNumber, err)
+		return nil, err
 	}
-	if got := page.PageNumber(); got != pageNumber {
-		return nil, fmt.Errorf("page %d: header says page %d", pageNumber, got)
+	if err := validateLayout(buf); err != nil {
+		return nil, fmt.Errorf("page %d: %w", n, err)
 	}
-	return page, nil
-}
-
-func (f *sqlFile) writePage(pageNumber int32, page Page) error {
-	if _, err := f.file.WriteAt(page.Encode(), int64(pageNumber)*maxPageSize); err != nil {
-		return fmt.Errorf("writing page %d: %w", pageNumber, err)
-	}
-	return nil
+	return &sqlSlottedPage{buf: append([]byte(nil), buf...)}, nil
 }
 
 // loadTail fills the tail cache from disk if it is empty and the file has
 // any pages.
 func (f *sqlFile) loadTail() error {
-	if f.tail != nil || f.numPages == 0 {
+	if f.tail != nil || f.pages.NumPages() == 0 {
 		return nil
 	}
-	page, err := f.readPage(f.numPages - 1)
+	page, err := f.readPage(f.pages.NumPages() - 1)
 	if err != nil {
 		return err
 	}
@@ -134,8 +104,8 @@ func (f *sqlFile) Insert(rowBytes []byte) (RowID, error) {
 	if f.tail != nil {
 		slot, err := f.tail.InsertRow(rowBytes)
 		if err == nil {
-			tailNumber := f.numPages - 1
-			if err := f.writePage(tailNumber, f.tail); err != nil {
+			tailNumber := f.pages.NumPages() - 1
+			if err := f.pages.WritePage(tailNumber, f.tail.Encode()); err != nil {
 				// The cached page now holds a row that never reached disk;
 				// drop it so the next operation reloads what is really there.
 				f.tail = nil
@@ -147,27 +117,27 @@ func (f *sqlFile) Insert(rowBytes []byte) (RowID, error) {
 		// through to a fresh page.
 	}
 
-	page := NewPage(f.numPages)
+	newNumber := f.pages.NumPages()
+	page := NewPage(newNumber)
 	slot, err := page.InsertRow(rowBytes)
 	if err != nil {
 		return RowID{}, fmt.Errorf("row too large to fit in a page: %w", err)
 	}
-	if err := f.writePage(f.numPages, page); err != nil {
+	if err := f.pages.WritePage(newNumber, page.Encode()); err != nil {
 		return RowID{}, err
 	}
 
-	id := RowID{Page: f.numPages, Slot: slot}
 	f.tail = page
-	f.numPages++
-	return id, nil
+	return RowID{Page: newNumber, Slot: slot}, nil
 }
 
 func (f *sqlFile) Delete(id RowID) error {
-	if id.Page < 0 || id.Page >= f.numPages {
-		return fmt.Errorf("page %d out of range [0, %d)", id.Page, f.numPages)
+	numPages := f.pages.NumPages()
+	if id.Page < 0 || id.Page >= numPages {
+		return fmt.Errorf("page %d out of range [0, %d)", id.Page, numPages)
 	}
 
-	isTail := id.Page == f.numPages-1
+	isTail := id.Page == numPages-1
 	var page Page
 	if isTail {
 		if err := f.loadTail(); err != nil {
@@ -184,7 +154,7 @@ func (f *sqlFile) Delete(id RowID) error {
 	if err := page.DeleteRow(id.Slot); err != nil {
 		return fmt.Errorf("page %d: %w", id.Page, err)
 	}
-	if err := f.writePage(id.Page, page); err != nil {
+	if err := f.pages.WritePage(id.Page, page.Encode()); err != nil {
 		if isTail {
 			f.tail = nil // see Insert: don't keep a change that never reached disk
 		}
@@ -197,13 +167,21 @@ func (f *sqlFile) Scan() iter.Seq2[Row, error] {
 	return func(yield func(Row, error) bool) {
 		// Snapshot the page count: rows inserted while a scan is running
 		// are not part of it.
-		numPages := f.numPages
+		numPages := f.pages.NumPages()
 		for pageNumber := int32(0); pageNumber < numPages; pageNumber++ {
-			page, err := f.readPage(pageNumber)
+			// A scan only reads, so it views the page buffer in place instead
+			// of copying it; the buffer is fresh per read and never mutated.
+			buf, err := f.pages.ReadPage(pageNumber)
+			if err == nil {
+				if err = validateLayout(buf); err != nil {
+					err = fmt.Errorf("page %d: %w", pageNumber, err)
+				}
+			}
 			if err != nil {
 				yield(Row{}, err)
 				return
 			}
+			page := &sqlSlottedPage{buf: buf}
 			for slot := 0; slot < page.SlotCount(); slot++ {
 				rowBytes, live := page.Row(slot)
 				if !live {
@@ -217,18 +195,8 @@ func (f *sqlFile) Scan() iter.Seq2[Row, error] {
 	}
 }
 
-func (f *sqlFile) Sync() error {
-	if err := f.file.Sync(); err != nil {
-		return fmt.Errorf("syncing file: %w", err)
-	}
-	return nil
-}
+func (f *sqlFile) Sync() error { return f.pages.Sync() }
 
 // Close closes the underlying file. There is nothing to flush: every write
 // already went straight to disk.
-func (f *sqlFile) Close() error {
-	if err := f.file.Close(); err != nil {
-		return fmt.Errorf("closing file: %w", err)
-	}
-	return nil
-}
+func (f *sqlFile) Close() error { return f.pages.Close() }

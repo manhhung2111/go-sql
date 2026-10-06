@@ -78,28 +78,38 @@ func DecodePage(data []byte) (Page, error) {
 		return nil, fmt.Errorf("checksum mismatch: stored %#x, computed %#x", want, got)
 	}
 
-	p := &sqlSlottedPage{buf: append([]byte(nil), data...)}
+	if err := validateLayout(data); err != nil {
+		return nil, err
+	}
+	return &sqlSlottedPage{buf: append([]byte(nil), data...)}, nil
+}
+
+// validateLayout checks that data's slot array and row area are consistent:
+// the data start lies after the slot array, and every live row lies inside the
+// row area. It only reads data, and assumes it is one page whose checksum was
+// already verified.
+func validateLayout(data []byte) error {
+	p := &sqlSlottedPage{buf: data}
 
 	slotArrayEnd := pageHeaderSize + p.SlotCount()*slotSize
 	dataStart := p.dataStart()
 	if dataStart < slotArrayEnd || dataStart > maxPageSize {
-		return nil, fmt.Errorf("data start %d outside [%d, %d]", dataStart, slotArrayEnd, maxPageSize)
+		return fmt.Errorf("data start %d outside [%d, %d]", dataStart, slotArrayEnd, maxPageSize)
 	}
 
 	for i := 0; i < p.SlotCount(); i++ {
 		offset, length := p.slot(i)
 		if offset == 0 {
 			if length != 0 {
-				return nil, fmt.Errorf("slot %d: tombstone with length %d", i, length)
+				return fmt.Errorf("slot %d: tombstone with length %d", i, length)
 			}
 			continue
 		}
 		if offset < dataStart || offset+length > maxPageSize {
-			return nil, fmt.Errorf("slot %d: row [%d, %d) outside row area [%d, %d)", i, offset, offset+length, dataStart, maxPageSize)
+			return fmt.Errorf("slot %d: row [%d, %d) outside row area [%d, %d)", i, offset, offset+length, dataStart, maxPageSize)
 		}
 	}
-
-	return p, nil
+	return nil
 }
 
 func (s *sqlSlottedPage) PageNumber() int32 {
