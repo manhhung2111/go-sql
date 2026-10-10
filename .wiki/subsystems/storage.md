@@ -22,11 +22,13 @@ A heap file is a sequence of 16KiB pages. Each page has a 12-byte header (checks
 
 ## Read path
 
-`Scan` yields every live row in page order, verifying each page's checksum and page number; a corrupt page ends the scan with its error. `OpenFile` rejects a file that is not a whole number of pages. A write-through page cache (`NewCachedPageFile`) provides per-file caching of immutable page buffers using LRU eviction without pins or dirty pages.
+`Scan` yields every live row in page order, verifying each page's checksum and page number; a corrupt page ends the scan with its error. `OpenFile` rejects a file that is not a whole number of pages. `Scan` reads pages straight through `PageFile.ReadPage` and does not use a cache.
+
+`NewCachedPageFile` is a write-through LRU cache of immutable page buffers (no pins, no dirty pages) that wraps any `PageFile`. Nothing uses it yet: it is a building block for a future index, and neither the heap file nor `Scan` goes through it.
 
 ## Limits
 
-- No indexes (other than page-level file and cache prerequisites), buffer pool (beyond per-file page cache), WAL, overflow pages or space reclamation: [tombstone deletes](../decisions/tombstone-deletes-no-reclaim.md), [full scans](../concepts/full-table-scans.md).
+- No indexes, buffer pool, WAL, overflow pages or space reclamation (a `PageFile` and an unused write-through page cache exist as groundwork for an index, but are not a buffer pool): [tombstone deletes](../decisions/tombstone-deletes-no-reclaim.md), [full scans](../concepts/full-table-scans.md).
 - A row over `MaxRowSize` (16368 bytes) is rejected by `Insert`; the engine rejects it earlier so a batch writes nothing.
 
 ## Engine-side encoding
