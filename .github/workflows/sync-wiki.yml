@@ -31,10 +31,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GEMINI_MODEL: gemini-2.5-flash
-  # Tried once if the first model fails. Pick a model with its OWN quota: the CLI rewrites
-  # gemini-3.5-flash to gemini-3.8-flash, so that pair shared one 20-requests-a-day free tier.
-  GEMINI_FALLBACK_MODEL: gemini-2.5-flash-lite
+  # Models are tried in this order until one produces a result. A model that is not available to
+  # the API key answers 404 in about two seconds, so listing one that is gone costs nothing.
+  # Free-tier quotas are per model, so each entry is its own pool of requests. The CLI rewrites
+  # gemini-3.5-flash to gemini-3.8-flash and gemini-3.1-flash-lite to gemini-3.5-flash-lite, which
+  # would share a quota: do not list a name together with the one it is rewritten to.
+  # gemini-2.5-flash and -lite are on the key's model list but answer "no longer available".
+  GEMINI_MODELS: gemini-3.8-flash gemini-3.7-flash gemini-3.6-flash gemini-3.5-flash-lite
   GEMINI_TIMEOUT_SECONDS: 600               # per attempt; the CLI's own retries stop after a few minutes
   GEMINI_CLI_VERSION: 0.62.0
   SKILL_PATH: .claude/skills/sync-wiki/SKILL.md
@@ -47,7 +50,7 @@ jobs:
     # against the default branch.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -242,7 +245,7 @@ jobs:
 
           used=""
           quota=""
-          for model in "$GEMINI_MODEL" "$GEMINI_FALLBACK_MODEL"; do
+          for model in $GEMINI_MODELS; do
             echo "::group::Gemini $model"
             : > /tmp/gemini.err
             # auto_edit: may read, search and edit files; shell and web tools are excluded above.
@@ -262,6 +265,11 @@ jobs:
               break
             fi
             echo "::warning::Gemini model $model failed (exit $code, $(wc -c < /tmp/gemini.out | tr -d ' ') bytes of output)"
+            # A model the key cannot use: the API names its replacement. Drop it from GEMINI_MODELS.
+            if grep -qE 'ModelNotFoundError|no longer available' /tmp/gemini.err; then
+              hint="$(grep -oE 'use models/[A-Za-z0-9.-]+' /tmp/gemini.err | head -1)"
+              echo "::warning::Gemini model $model is not available to this API key (${hint:-no replacement named}). Remove it from GEMINI_MODELS."
+            fi
             # Free-tier requests per day are limited per model; once used up, retrying is pointless.
             if grep -qE 'exhausted your daily quota|TerminalQuotaError|generate_content_free_tier_requests' /tmp/gemini.err; then
               retry="$(grep -oE 'Please retry in [0-9a-z.]+' /tmp/gemini.err | head -1)"
@@ -275,7 +283,7 @@ jobs:
 
           echo "quota=${quota# }" >> "$GITHUB_OUTPUT"
           if [ -z "$used" ]; then
-            echo "::error::No Gemini model produced a result ($GEMINI_MODEL, then $GEMINI_FALLBACK_MODEL); nothing was ingested"
+            echo "::error::No Gemini model produced a result (tried: $GEMINI_MODELS); nothing was ingested"
             exit 1
           fi
           echo "model=$used" >> "$GITHUB_OUTPUT"
@@ -424,10 +432,11 @@ jobs:
               echo "| | |"
               echo "|---|---|"
               echo "| PRs | $PRS |"
-              if [ "$MODEL" = "$GEMINI_MODEL" ]; then
+              first="${GEMINI_MODELS%% *}"
+              if [ "$MODEL" = "$first" ]; then
                 echo "| Model | \`$MODEL\` |"
               else
-                echo "| Model | \`$MODEL\` (fallback: \`$GEMINI_MODEL\` failed) |"
+                echo "| Model | \`$MODEL\` (fallback: \`$first\` failed) |"
               fi
               echo "| Wiki pages changed | $PAGES |"
               echo "| Not yet ingested | ${REMAINING:-0} |"
