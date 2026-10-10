@@ -31,8 +31,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GEMINI_MODEL: gemini-3.8-flash
-  GEMINI_FALLBACK_MODEL: gemini-3.5-flash   # tried once if the first model fails (e.g. 503 high demand)
+  GEMINI_MODEL: gemini-2.5-flash
+  # Tried once if the first model fails. Pick a model with its OWN quota: the CLI rewrites
+  # gemini-3.5-flash to gemini-3.8-flash, so that pair shared one 20-requests-a-day free tier.
+  GEMINI_FALLBACK_MODEL: gemini-2.5-flash-lite
   GEMINI_TIMEOUT_SECONDS: 600               # per attempt; the CLI's own retries stop after a few minutes
   GEMINI_CLI_VERSION: 0.62.0
   SKILL_PATH: .claude/skills/sync-wiki/SKILL.md
@@ -175,6 +177,8 @@ jobs:
 
       # The model gets file tools only: no shell, no web access. The settings go in the
       # user-level file, not the repo, so the scope check below never sees them.
+      # maxAttempts caps the CLI's own retries (default 10, with growing waits). Every retry
+      # counts against the free tier's daily request quota, and a 503 storm used all 20.
       - name: Restrict Gemini tools
         if: steps.collect.outputs.skip == 'false'
         run: |
@@ -183,6 +187,9 @@ jobs:
           {
             "tools": {
               "exclude": ["run_shell_command", "web_fetch", "web_search"]
+            },
+            "general": {
+              "maxAttempts": 3
             }
           }
           EOF
@@ -234,14 +241,18 @@ jobs:
           set -o pipefail
 
           used=""
+          quota=""
           for model in "$GEMINI_MODEL" "$GEMINI_FALLBACK_MODEL"; do
             echo "::group::Gemini $model"
+            : > /tmp/gemini.err
             # auto_edit: may read, search and edit files; shell and web tools are excluded above.
+            # stderr goes to a file so a quota error can be recognised, then is shown below.
             set +e
             timeout "$GEMINI_TIMEOUT_SECONDS" gemini -m "$model" --approval-mode=auto_edit \
-              -p "Carry out the task described in the input." < /tmp/prompt.md | tee /tmp/gemini.out
+              -p "Carry out the task described in the input." < /tmp/prompt.md 2>/tmp/gemini.err | tee /tmp/gemini.out
             code=$?
             set -e
+            cat /tmp/gemini.err >&2
             echo "::endgroup::"
 
             # A run that did the work exits 0 and prints a reply; anything else (a 503
@@ -251,11 +262,18 @@ jobs:
               break
             fi
             echo "::warning::Gemini model $model failed (exit $code, $(wc -c < /tmp/gemini.out | tr -d ' ') bytes of output)"
+            # Free-tier requests per day are limited per model; once used up, retrying is pointless.
+            if grep -qE 'exhausted your daily quota|TerminalQuotaError|generate_content_free_tier_requests' /tmp/gemini.err; then
+              retry="$(grep -oE 'Please retry in [0-9a-z.]+' /tmp/gemini.err | head -1)"
+              echo "::warning::Gemini model $model: the daily quota is used up (${retry:-no reset time given}). Use another model, wait for the reset, or enable billing on the key."
+              quota="$quota $model"
+            fi
             # Start the next model from a clean wiki, not from a half-finished edit.
             git checkout -q -- .wiki
             git clean -fdq -- .wiki
           done
 
+          echo "quota=${quota# }" >> "$GITHUB_OUTPUT"
           if [ -z "$used" ]; then
             echo "::error::No Gemini model produced a result ($GEMINI_MODEL, then $GEMINI_FALLBACK_MODEL); nothing was ingested"
             exit 1
@@ -381,6 +399,7 @@ jobs:
           PAGES: ${{ steps.log.outputs.pages }}
           PR_URL: ${{ steps.pr.outputs.pull-request-url }}
           GEMINI_OUTCOME: ${{ steps.gemini.outcome }}
+          QUOTA: ${{ steps.gemini.outputs.quota }}
           LINT_OUTCOME: ${{ steps.lint.outcome }}
         run: |
           {
@@ -390,6 +409,9 @@ jobs:
               echo "**Failed** (job $JOB_STATUS), nothing was ingested. See the annotations above and the failing step's log."
               if [ "$GEMINI_OUTCOME" = "failure" ]; then
                 echo "- The Gemini step failed: no model produced a result."
+              fi
+              if [ -n "$QUOTA" ]; then
+                echo "- Daily free-tier quota used up for: $QUOTA. Wait for the reset, change the model, or enable billing."
               fi
               if [ "$LINT_OUTCOME" = "failure" ]; then
                 echo "- \`check.sh\` still failed after Gemini's fix attempts."
