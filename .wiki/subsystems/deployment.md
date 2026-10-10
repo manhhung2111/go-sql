@@ -6,9 +6,17 @@ sources:
   - deploy/config.docker.yml
   - .github/workflows/ci.yml
   - .github/workflows/docker.yml
+  - .github/workflows/sync-wiki.yml
+  - .claude/skills/sync-wiki/SKILL.md
+  - docs/superpowers/specs/2026-10-05-llm-wiki-design.md
   - Makefile
   - pr: 18
-updated: 09d8ab0
+  - pr: 23
+  - pr: 27
+  - pr: 28
+  - pr: 29
+  - pr: 30
+updated: 7660bd0
 ---
 # Build, CI and deployment subsystem
 
@@ -22,6 +30,7 @@ Both workflows trigger only on pull requests into `main`, so stacked PRs are not
 
 - `ci.yml`: `gofmt -l .` must print nothing, then `go vet ./...`, `go build ./...`, `go test -race ./...`.
 - `docker.yml`: builds the image (not pushed), checks it does not run as root, starts it, waits for the server to answer, stops it with SIGTERM and requires exit code 0 and a `server stopped` log line. The readiness check sends a real HTTP/2 request with `curl` because Docker's port proxy accepts connections even when nothing answers behind it (#18).
+- `sync-wiki.yml`: automated workflow running after pushes to `main` (or via `workflow_dispatch`) that executes the `/sync-wiki` skill with Gemini (`sync-wiki.yml`, #23, #27, #28, #29, #30). It sets `GEMINI_CLI_TRUST_WORKSPACE=true` for headless execution, tries models in `GEMINI_MODELS` in order with fallback on failure (503, quota, 404, timeout, or silence), caps retries via `general.maxAttempts: 3` to avoid exhausting daily quotas, lints with `.wiki/check.sh`, appends to `log.md`, and opens/updates a PR via `peter-evans/create-pull-request` with job summaries.
 
 ## Make targets
 
@@ -31,4 +40,4 @@ Both workflows trigger only on pull requests into `main`, so stacked PRs are not
 
 The Docker smoke test deliberately does not check persistence (#18). `main` has no branch protection, so the new job is not a required check (#18).
 
-The `init-wiki` and `sync-wiki` skills (`.claude/skills/init-wiki/SKILL.md`, `.claude/skills/sync-wiki/SKILL.md`, #21) build and maintain this wiki. `/init-wiki` is the one-off build and `/sync-wiki` ingests the PRs merged since the marker in `log.md`. Neither commits, pushes or opens a PR; they write only inside `.wiki/` and propose a commit for approval. The conventions they follow are in [SCHEMA.md](../SCHEMA.md), and `.wiki/check.sh` is their validator.
+The `init-wiki` and `sync-wiki` skills (`.claude/skills/init-wiki/SKILL.md`, `.claude/skills/sync-wiki/SKILL.md`, #21, #23, #27, #28, #29, #30) build and maintain this wiki. `/init-wiki` is the one-off build and `/sync-wiki` ingests the PRs merged since the marker in `log.md`. Neither commits, pushes or opens a PR directly (except via the automated CI workflow handling `peter-evans/create-pull-request`); they write only inside `.wiki/` and propose a commit for approval. The conventions they follow are in [SCHEMA.md](../SCHEMA.md), and `.wiki/check.sh` is their validator.

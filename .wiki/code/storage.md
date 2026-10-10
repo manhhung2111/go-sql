@@ -3,9 +3,11 @@ title: internal/storage
 kind: code
 sources:
   - internal/storage/
+  - docs/superpowers/specs/2026-10-06-page-file-and-cache-design.md
   - pr: 3
   - pr: 4
-updated: 09d8ab0
+  - pr: 25
+updated: 7660bd0
 ---
 # internal/storage
 
@@ -22,7 +24,9 @@ Standard library only. It never imports `internal/parser` or `internal/engine`.
 | File | Responsibility |
 | --- | --- |
 | `page.go` | `Page` interface and slotted page: `NewPage`, `DecodePage`, `InsertRow`, `Row`, `DeleteRow`, `SlotCount`, `PageNumber`, `Encode`; constants `maxPageSize`, `MaxRowSize` |
-| `file.go` | `File` interface, `CreateFile`, `OpenFile`, `RowID{Page, Slot}`, `Row`; `Insert`, `Delete`, `Scan`, `Sync`, `Close` |
+| `pagefile.go` | `PageFile` interface (`ReadPage`, `WritePage`, `AllocatePage`, `NumPages`, `Sync`, `Close`), `CreatePageFile`, `OpenPageFile`: verifies and stamps format-neutral headers (checksum and page number) |
+| `pagecache.go` | `NewCachedPageFile`: per-file, write-through LRU cache with immutable buffers (no pins, no dirty pages) |
+| `file.go` | `File` interface built on top of `PageFile`, `CreateFile`, `OpenFile`, `RowID{Page, Slot}`, `Row`; `Insert`, `Delete`, `Scan`, `Sync`, `Close` |
 | `dir.go` | `SyncDir`: fsync a directory so created entries survive a power loss |
 | `storage.go` | Package declaration only |
 
@@ -30,6 +34,8 @@ Standard library only. It never imports `internal/parser` or `internal/engine`.
 
 - Page layout (little-endian header): checksum (bytes 0-4, CRC32 over bytes 4 to the end), page number (4-8), slot count (8-10), data start (10-12). The slot array grows forward from the header and row data grows backward from the page end.
 - `MaxRowSize` is `16384 - 12 - 4 = 16368` bytes: a full page minus the header and the row's own slot.
+- `PageFile` provides random page-level access (`ReadPage`, `WritePage`, `AllocatePage`) verifying and stamping the 8 format-neutral header bytes.
+- `NewCachedPageFile` wraps a `PageFile` with a write-through LRU cache of immutable buffers (no pins, no dirty pages; replacements replace cached frames, and failed writes drop the entry).
 - `File.Scan()` is an `iter.Seq2[Row, error]`: it verifies each page's checksum and page number and ends with an error on a corrupt page. `Row.Bytes` is only valid until the next iteration.
 - `CreateFile` fails if the path exists and fsyncs the parent directory; `OpenFile` rejects a size that is not a whole number of pages.
 
