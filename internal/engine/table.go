@@ -41,6 +41,11 @@ type SqlTable struct {
 	// allocator names a replacement file when a schema change rewrites rows.
 	store    *catalogStore
 	database string
+
+	// idx caches indexes of the file; see tableIndexes. noIndexes turns them
+	// off so tests can compare behaviour with and without.
+	idx       tableIndexes
+	noIndexes bool
 }
 
 // Rules when for a table schema:

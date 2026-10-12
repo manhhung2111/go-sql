@@ -2,9 +2,11 @@ package engine
 
 import (
 	"errors"
+	"iter"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -218,4 +220,28 @@ func restart(t *testing.T, dir string, old Catalog) (Catalog, Engine) {
 	require.NoError(t, old.Close())
 	c := newTestCatalogAt(t, dir)
 	return c, NewEngine(c)
+}
+
+// countingFile wraps a storage.File and counts the scans and gets made on it.
+type countingFile struct {
+	storage.File
+	scans atomic.Int64
+	gets  atomic.Int64
+}
+
+func (f *countingFile) Scan() iter.Seq2[storage.Row, error] {
+	f.scans.Add(1)
+	return f.File.Scan()
+}
+
+func (f *countingFile) Get(id storage.RowID) ([]byte, error) {
+	f.gets.Add(1)
+	return f.File.Get(id)
+}
+
+// countOn replaces the table's file with a counting wrapper around it.
+func countOn(table *SqlTable) *countingFile {
+	cf := &countingFile{File: table.file}
+	table.file = cf
+	return cf
 }
