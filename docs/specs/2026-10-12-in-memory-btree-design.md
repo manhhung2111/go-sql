@@ -64,7 +64,7 @@ func (t *Tree) Range(lo, hi []byte) iter.Seq2[[]byte, storage.RowID]
 ```
 
 - `Insert` returns an error wrapping `ErrDuplicateKey` or `ErrKeyTooLong` (checked with `errors.Is`) and leaves the tree unchanged. Messages follow the repo convention: lowercase, no trailing punctuation.
-- The tree copies keys on `Insert`, so it owns its bytes. Keys yielded by `Range` are valid until the next modification; copy to keep.
+- The tree copies keys on `Insert`, so it owns its bytes. Keys yielded by `Range` are the tree's own bytes (separators share them): they must not be modified, and they are valid until the next modification; copy to keep.
 - `Range` is half-open `[lo, hi)`. `lo == nil` starts at the first key; `hi == nil` runs to the end. A non-nil empty `hi` is an empty range, and a non-nil empty `lo` is the same as `nil`. Inclusive upper bounds and reverse iteration are left for the wiring phase if a query needs them.
 - A tree must not be modified while a `Range` is being consumed; the caller holds the table lock.
 - The empty key is a valid key.

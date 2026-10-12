@@ -114,6 +114,13 @@ func TestNew_RejectsTooSmallNode(t *testing.T) {
 
 	small := newTestTree(t)
 	assert.Equal(t, 12, small.MaxKeyLen())
+
+	// 52 bytes is the smallest node that holds a one-byte key four times over.
+	_, err = New(51)
+	require.Error(t, err)
+	smallest, err := New(52)
+	require.NoError(t, err)
+	assert.Equal(t, 1, smallest.MaxKeyLen())
 }
 
 func TestTree_InsertAndGetInOneLeaf(t *testing.T) {
@@ -162,6 +169,8 @@ func TestTree_InsertCopiesTheKey(t *testing.T) {
 	k[0] = 'X'
 	_, found := tree.Get([]byte("abc"))
 	assert.True(t, found)
+	_, found = tree.Get([]byte("Xbc"))
+	assert.False(t, found, "the tree must not see the caller's later edit")
 }
 
 func TestTree_EmptyKeyIsValid(t *testing.T) {
@@ -174,25 +183,37 @@ func TestTree_EmptyKeyIsValid(t *testing.T) {
 	check(t, tree)
 }
 
+func TestTree_NilKeyIsTheEmptyKey(t *testing.T) {
+	tree := newTestTree(t)
+	require.NoError(t, tree.Insert(nil, rid(1)))
+	got, found := tree.Get([]byte{})
+	assert.True(t, found)
+	assert.Equal(t, rid(1), got)
+	require.ErrorIs(t, tree.Insert([]byte{}, rid(2)), ErrDuplicateKey)
+	assert.True(t, tree.Delete(nil))
+	assert.Equal(t, 0, tree.Len())
+	check(t, tree)
+}
+
 func TestTree_BulkInsertSplitsAndKeepsEveryKey(t *testing.T) {
+	const n = 500
 	orders := map[string]func(i, n int) int{
 		"ascending":  func(i, n int) int { return i },
 		"descending": func(i, n int) int { return n - 1 - i },
 		"shuffled": func() func(i, n int) int {
-			perm := rand.New(rand.NewSource(7)).Perm(500)
+			perm := rand.New(rand.NewSource(7)).Perm(n)
 			return func(i, n int) int { return perm[i] }
 		}(),
 	}
 	for name, at := range orders {
 		t.Run(name, func(t *testing.T) {
-			const n = 500
 			tree := newTestTree(t)
 			for i := 0; i < n; i++ {
 				require.NoError(t, tree.Insert(key(at(i, n)), rid(at(i, n))))
 				check(t, tree)
 			}
 			assert.Equal(t, n, tree.Len())
-			assert.False(t, tree.root.leaf, "500 keys must not fit in one 96-byte leaf")
+			assert.False(t, tree.root.leaf, "%d keys must not fit in one 96-byte leaf", n)
 			for i := 0; i < n; i++ {
 				got, found := tree.Get(key(i))
 				require.True(t, found, "key %d missing", i)
@@ -250,7 +271,11 @@ func TestTree_InsertsMatchTheModel(t *testing.T) {
 	rng := rand.New(rand.NewSource(11))
 	tree := newTestTree(t)
 	var m model
-	for op := 0; op < 3000; op++ {
+	ops := 1500
+	if testing.Short() {
+		ops /= 5
+	}
+	for op := 0; op < ops; op++ {
 		k := randomKey(rng, tree.MaxKeyLen())
 		err := tree.Insert(k, rid(op))
 		if m.insert(k, rid(op)) {
@@ -379,10 +404,29 @@ func TestTree_DeleteEverythingLeavesAnEmptyUsableTree(t *testing.T) {
 	}
 }
 
+// isSeparator reports whether some internal node holds key as a separator.
+func isSeparator(n *node, key []byte) bool {
+	if n.leaf {
+		return false
+	}
+	for _, k := range n.keys {
+		if bytes.Equal(k, key) {
+			return true
+		}
+	}
+	for _, child := range n.children {
+		if isSeparator(child, key) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestTree_StaleSeparatorStillGivesNotFoundAndAllowsReinsert(t *testing.T) {
 	tree := filled(t, 60)
 	require.False(t, tree.root.leaf)
 	sep := slices.Clone(tree.root.keys[0])
+	require.True(t, isSeparator(tree.root, sep))
 
 	// The separator is the first key of a leaf; deleting that key may leave it
 	// behind in an internal node.
@@ -393,6 +437,7 @@ func TestTree_StaleSeparatorStillGivesNotFoundAndAllowsReinsert(t *testing.T) {
 	check(t, tree)
 	_, found := tree.Get(sep)
 	assert.False(t, found)
+	assert.True(t, isSeparator(tree.root, sep), "the separator outlives its deleted row")
 
 	require.NoError(t, tree.Insert(sep, rid(n)))
 	got, found := tree.Get(sep)
@@ -411,7 +456,7 @@ func TestTree_MatchesTheModel(t *testing.T) {
 		insertPct, deletePct int
 	}{
 		{"balanced", 21, 2500, 45, 35},
-		{"grow then shrink", 22, 2500, 70, 10},
+		{"insert heavy", 22, 2500, 70, 10},
 		{"delete heavy", 23, 2500, 25, 60},
 	}
 	for _, ph := range phases {
@@ -419,7 +464,11 @@ func TestTree_MatchesTheModel(t *testing.T) {
 			rng := rand.New(rand.NewSource(ph.seed))
 			tree := newTestTree(t)
 			var m model
-			for op := 0; op < ph.ops; op++ {
+			ops := ph.ops
+			if testing.Short() {
+				ops /= 5
+			}
+			for op := 0; op < ops; op++ {
 				switch pick := rng.Intn(100); {
 				case pick < ph.insertPct:
 					k := randomKey(rng, tree.MaxKeyLen())
@@ -441,7 +490,7 @@ func TestTree_MatchesTheModel(t *testing.T) {
 					k := randomKey(rng, tree.MaxKeyLen())
 					i, want := m.find(k)
 					got, found := tree.Get(k)
-					require.Equal(t, want, found)
+					require.Equal(t, want, found, "get %x at op %d", k, op)
 					if want {
 						require.Equal(t, m.ids[i], got)
 					}

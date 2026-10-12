@@ -247,8 +247,9 @@ func (t *Tree) splitInternal(n *node) ([]byte, *node) {
 
 // Range yields the keys in [lo, hi) in order. A nil lo starts at the first
 // key and a nil hi runs to the last; a non-nil empty hi is an empty range.
-// Yielded keys are valid until the tree is next modified. The tree must not be
-// modified while iterating.
+// Yielded keys are the tree's own bytes: they must not be modified, and they
+// are valid until the tree is next modified. The tree must not be modified
+// while iterating.
 func (t *Tree) Range(lo, hi []byte) iter.Seq2[[]byte, storage.RowID] {
 	return func(yield func([]byte, storage.RowID) bool) {
 		n := t.root
