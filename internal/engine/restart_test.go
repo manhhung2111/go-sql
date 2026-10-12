@@ -140,3 +140,22 @@ func TestRestart_IsStableAndNeverReusesFileIDs(t *testing.T) {
 	assert.Greater(t, orders.(*SqlTable).fileID, first)
 	require.NotNil(t, c)
 }
+
+func TestRestart_IndexesAreRebuiltLazilyAndKeepChecking(t *testing.T) {
+	dir := t.TempDir()
+	c := newTestCatalogAt(t, dir)
+	e := NewEngine(c)
+	mustExec(t, e, "", "CREATE DATABASE shop")
+	mustExec(t, e, "shop", "CREATE TABLE accounts (id INT PRIMARY KEY, email VARCHAR(50) UNIQUE)")
+	mustExec(t, e, "shop", "INSERT INTO accounts (id, email) VALUES (1, 'a@x.com'), (2, 'b@x.com'), (3, 'c@x.com')")
+	require.ErrorContains(t, execError(t, e, "shop", "INSERT INTO accounts (id, email) VALUES (9, 'a@x.com')"), "duplicate entry")
+	mustExec(t, e, "shop", "UPDATE accounts SET email = 'moved@x.com' WHERE id = 2")
+	mustExec(t, e, "shop", "DELETE FROM accounts WHERE id = 3")
+
+	_, e = restart(t, dir, c)
+
+	assert.ErrorContains(t, execError(t, e, "shop", "INSERT INTO accounts (id, email) VALUES (9, 'moved@x.com')"), "duplicate entry")
+	assert.ErrorContains(t, execError(t, e, "shop", "INSERT INTO accounts (id, email) VALUES (1, 'new@x.com')"), "duplicate entry")
+	mustExec(t, e, "shop", "INSERT INTO accounts (id, email) VALUES (3, 'c@x.com')")  // the delete freed both
+	mustExec(t, e, "shop", "INSERT INTO accounts (id, email) VALUES (10, 'b@x.com')") // the update freed the old email
+}

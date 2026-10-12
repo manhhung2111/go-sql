@@ -766,6 +766,7 @@ func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[strin
 	// Only the key values of the matching rows are kept, and only if there is
 	// an index to update.
 	trackKeys := t.builtIndexes() != nil
+	keyCols := t.keyColumns()
 	var matched []storage.RowID
 	var keys [][]any
 	for row, err := range t.file.Scan() {
@@ -783,7 +784,7 @@ func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[strin
 		if isMatch {
 			matched = append(matched, row.ID)
 			if trackKeys {
-				keys = append(keys, t.keyValues(decoded))
+				keys = append(keys, keyValuesAt(decoded, keyCols))
 			}
 		}
 	}
@@ -859,9 +860,6 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 		assigned[a.index] = a.value
 		col := t.Columns[a.index]
 		if col.IsPrimaryKey() || col.IsUnique() {
-			if err := checkKeyLength(col.Name, a.value); err != nil {
-				return err
-			}
 			uniqueColumns = append(uniqueColumns, a.index)
 		}
 	}
@@ -876,6 +874,7 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 	// If the indexes are built, remember each matched row's old key values so
 	// they can be removed after the write.
 	trackKeys := t.builtIndexes() != nil
+	keyCols := t.keyColumns()
 
 	var oldIDs []storage.RowID
 	var oldKeys [][]any
@@ -907,7 +906,7 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 		}
 		oldIDs = append(oldIDs, fileRow.ID)
 		if trackKeys {
-			oldKeys = append(oldKeys, t.keyValues(row))
+			oldKeys = append(oldKeys, keyValuesAt(row, keyCols))
 		}
 		for _, a := range resolved {
 			row[a.index] = a.value
@@ -916,6 +915,13 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 	}
 
 	if len(updated) > 0 {
+		// An UPDATE that matches no row stores nothing, so only now is a long
+		// value a problem.
+		for _, idx := range uniqueColumns {
+			if err := checkKeyLength(t.Columns[idx].Name, assigned[idx]); err != nil {
+				return err
+			}
+		}
 		for _, idx := range uniqueColumns {
 			if tree := trees[idx]; tree != nil && assigned[idx] != nil {
 				key, err := index.EncodeKey(assigned[idx])

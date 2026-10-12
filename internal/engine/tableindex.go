@@ -38,9 +38,9 @@ func (t *SqlTable) keyColumns() []int {
 	return cols
 }
 
-// keyValues returns row's values at the key columns, in keyColumns order.
-func (t *SqlTable) keyValues(row []any) []any {
-	cols := t.keyColumns()
+// keyValuesAt returns row's values at cols, which a statement computes once
+// with keyColumns.
+func keyValuesAt(row []any, cols []int) []any {
 	values := make([]any, len(cols))
 	for i, col := range cols {
 		values[i] = row[col]

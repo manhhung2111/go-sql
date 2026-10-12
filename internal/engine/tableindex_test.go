@@ -411,3 +411,48 @@ func TestTableIndexes_CloseAndDropDiscardThem(t *testing.T) {
 	require.NoError(t, dropped.Drop())
 	assert.Nil(t, dropped.builtIndexes())
 }
+
+// With no PRIMARY KEY, an UPDATE of the UNIQUE column can be the first
+// statement to need the index. It builds the trees itself, and must still
+// remember the old key so it can be removed afterwards.
+func TestTableIndexes_AnUpdateThatBuildsThemLeavesThemRight(t *testing.T) {
+	table, err := newTempTable(t, "contacts", []parser.ColumnDefinition{
+		{Name: "email", DataType: parser.VarCharDataType{Size: 100}, Constraints: []parser.Constraint{parser.UniqueConstraint{}}},
+		{Name: "name", DataType: parser.VarCharDataType{Size: 50}},
+	})
+	require.NoError(t, err)
+	writeRaw(t, table, []any{"a@x.com", "A"})
+	require.Nil(t, table.builtIndexes())
+
+	require.NoError(t, table.Update([]parser.Assignment{{Column: "email", Value: strTok("b@x.com")}}, nil))
+
+	assertIndexesMatchHeap(t, table)
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(strTok("a@x.com"), strTok("A again"))}), "the old email is free")
+}
+
+// An entry the file does not back means the index was wrong: it is discarded.
+func TestTableIndexes_AMissingEntryDiscardsThem(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(table *SqlTable) error
+	}{
+		{"delete", func(table *SqlTable) error {
+			return table.Delete(cmp(identTok("id"), parser.EQ, numTok("3")))
+		}},
+		{"update", func(table *SqlTable) error {
+			return table.Update([]parser.Assignment{{Column: "name", Value: strTok("x")}}, cmp(identTok("id"), parser.EQ, numTok("3")))
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			table := builtKeyedTable(t)
+			key, err := index.EncodeKey(int64(3))
+			require.NoError(t, err)
+			require.True(t, table.builtIndexes()[colID].Delete(key), "now the index disagrees with the file")
+
+			require.NoError(t, tc.run(table))
+
+			assert.Nil(t, table.builtIndexes())
+		})
+	}
+}

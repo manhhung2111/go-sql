@@ -57,7 +57,7 @@ type tableIndexes struct {
 
 ### Long keys
 
-`INSERT`, `UPDATE` and `ADD COLUMN` check every PRIMARY KEY/UNIQUE value they are about to store. A string over `MaxKeyLenFor(DefaultNodeBytes)` fails with `key too long for column %q: %d bytes exceeds the maximum of %d`. For `INSERT` the check sits in `checkUniqueness`, in row order and column order, where a duplicate would be reported. Rows already on disk with over-long values keep working; the build degrades their column.
+`INSERT`, `UPDATE` and `ADD COLUMN` check every PRIMARY KEY/UNIQUE value they are about to store. An `UPDATE` that matches no row stores nothing, so it is not checked; `ADD COLUMN` checks its default even on an empty table, because the default is what later rows receive. A string over `MaxKeyLenFor(DefaultNodeBytes)` fails with `key too long for column %q: %d bytes exceeds the maximum of %d`. For `INSERT` the check sits in `checkUniqueness`, in row order and column order, where a duplicate would be reported. Rows already on disk with over-long values keep working; the build degrades their column.
 
 ### Uniqueness checks (`checkUniqueness`, `Update`)
 

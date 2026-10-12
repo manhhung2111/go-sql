@@ -39,6 +39,7 @@ func TestUniqueness_TheFirstStatementBuildsTheIndexWithOneScan(t *testing.T) {
 	table := keyedTable(t)
 	cf := countOn(table)
 	insertUser(t, table, 1, "a@x.com", "A")
+	assert.EqualValues(t, 1, cf.scans.Load(), "the first statement that needs the index builds it with one scan")
 	cf.scans.Store(0)
 
 	insertUser(t, table, 2, "b@x.com", "B")
@@ -187,6 +188,16 @@ func TestLongKeys_AreRejectedAtTheLimit(t *testing.T) {
 		assert.EqualError(t, err, wantErr)
 		assertTableRows(t, table, []any{int64(1), "c", "n"})
 		require.NoError(t, table.Update([]parser.Assignment{{Column: "code", Value: strTok(atLimit)}}, nil))
+	})
+
+	t.Run("an UPDATE that matches no row stores nothing, so it is not checked", func(t *testing.T) {
+		table := codesTable(t)
+		require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("1"), strTok("c"), strTok("n"))}))
+
+		require.NoError(t, table.Update(
+			[]parser.Assignment{{Column: "code", Value: strTok(overLimit)}},
+			cmp(identTok("id"), parser.EQ, numTok("99"))))
+		assertTableRows(t, table, []any{int64(1), "c", "n"})
 	})
 
 	t.Run("ADD COLUMN with a long default", func(t *testing.T) {
