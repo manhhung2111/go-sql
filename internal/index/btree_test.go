@@ -341,3 +341,62 @@ func TestTree_RangeOnAnEmptyTree(t *testing.T) {
 	keys, _ := collect(newTestTree(t), nil, nil)
 	assert.Empty(t, keys)
 }
+
+func TestTree_DeleteAbsentKey(t *testing.T) {
+	tree := filled(t, 50)
+	assert.False(t, tree.Delete([]byte("nope")))
+	assert.Equal(t, 50, tree.Len())
+	check(t, tree)
+}
+
+func TestTree_DeleteEverythingLeavesAnEmptyUsableTree(t *testing.T) {
+	const n = 400
+	asc := make([]int, n)
+	desc := make([]int, n)
+	for i := range asc {
+		asc[i], desc[i] = i, n-1-i
+	}
+	for name, order := range map[string][]int{
+		"ascending":  asc,
+		"descending": desc,
+		"shuffled":   rand.New(rand.NewSource(3)).Perm(n),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := filled(t, n)
+			for i, k := range order {
+				require.True(t, tree.Delete(key(k)), "key %d", k)
+				require.Equal(t, n-1-i, tree.Len())
+				check(t, tree)
+				_, found := tree.Get(key(k))
+				require.False(t, found)
+			}
+			assert.True(t, tree.root.leaf, "an emptied tree collapses to a single leaf")
+			assert.Equal(t, nodeHeaderSize, tree.root.used)
+
+			require.NoError(t, tree.Insert([]byte("again"), rid(1)))
+			check(t, tree)
+		})
+	}
+}
+
+func TestTree_StaleSeparatorStillGivesNotFoundAndAllowsReinsert(t *testing.T) {
+	tree := filled(t, 60)
+	require.False(t, tree.root.leaf)
+	sep := slices.Clone(tree.root.keys[0])
+
+	// The separator is the first key of a leaf; deleting that key may leave it
+	// behind in an internal node.
+	var n int
+	_, err := fmt.Sscanf(string(sep), "k%05d", &n)
+	require.NoError(t, err)
+	require.True(t, tree.Delete(sep))
+	check(t, tree)
+	_, found := tree.Get(sep)
+	assert.False(t, found)
+
+	require.NoError(t, tree.Insert(sep, rid(n)))
+	got, found := tree.Get(sep)
+	assert.True(t, found)
+	assert.Equal(t, rid(n), got)
+	check(t, tree)
+}

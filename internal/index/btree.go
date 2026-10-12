@@ -84,6 +84,13 @@ func (n *node) childIndex(key []byte) int {
 	return sort.Search(len(n.keys), func(i int) bool { return bytes.Compare(n.keys[i], key) > 0 })
 }
 
+func removeAt[T any](s []T, i int) []T {
+	var zero T
+	copy(s[i:], s[i+1:])
+	s[len(s)-1] = zero
+	return s[:len(s)-1]
+}
+
 func insertAt[T any](s []T, i int, v T) []T {
 	var zero T
 	s = append(s, zero)
@@ -260,4 +267,158 @@ func (t *Tree) Range(lo, hi []byte) iter.Seq2[[]byte, storage.RowID] {
 			}
 		}
 	}
+}
+
+// Delete removes key and reports whether it was present. Only the leaf holding
+// the key changes, plus whatever rebalancing the leaf's shrinking triggers; a
+// separator equal to the key may stay behind.
+func (t *Tree) Delete(key []byte) bool {
+	found, sep, right := t.delete(t.root, key)
+	if !found {
+		return false
+	}
+	if right != nil {
+		t.growRoot(sep, right)
+	}
+	for !t.root.leaf && len(t.root.keys) == 0 {
+		t.root = t.root.children[0]
+	}
+	t.size--
+	return true
+}
+
+// delete removes key below n and rebalances under-full children. Borrowing can
+// replace a separator with a longer one, so n may overflow and split; the
+// separator and right sibling are returned like insert's.
+func (t *Tree) delete(n *node, key []byte) (bool, []byte, *node) {
+	if n.leaf {
+		i, found := n.search(key)
+		if !found {
+			return false, nil, nil
+		}
+		n.used -= leafEntrySize(n.keys[i])
+		n.keys = removeAt(n.keys, i)
+		n.ids = removeAt(n.ids, i)
+		return true, nil, nil
+	}
+
+	ci := n.childIndex(key)
+	found, csep, cright := t.delete(n.children[ci], key)
+	if !found {
+		return false, nil, nil
+	}
+	if cright != nil {
+		n.adoptSplit(ci, csep, cright)
+	} else if n.children[ci].used < t.nodeBytes/2 {
+		t.rebalance(n, ci)
+	}
+	if n.used <= t.nodeBytes {
+		return true, nil, nil
+	}
+	sep, right := t.splitInternal(n)
+	return true, sep, right
+}
+
+// rebalance fixes the under-full child ci of parent: it borrows from a
+// sibling that stays at least half full, else merges with a sibling when the
+// two fit in one node, else leaves the child alone.
+func (t *Tree) rebalance(parent *node, ci int) {
+	hasLeft, hasRight := ci > 0, ci+1 < len(parent.children)
+	switch {
+	case hasLeft && t.borrowFromLeft(parent, ci):
+	case hasRight && t.borrowFromRight(parent, ci):
+	case hasLeft && t.merge(parent, ci-1):
+	case hasRight && t.merge(parent, ci):
+	}
+}
+
+// borrowFromLeft moves the last entry of the left sibling into child ci.
+func (t *Tree) borrowFromLeft(parent *node, ci int) bool {
+	left, child, s := parent.children[ci-1], parent.children[ci], ci-1
+	last := len(left.keys) - 1
+	if child.leaf {
+		moved := leafEntrySize(left.keys[last])
+		if left.used-moved < t.nodeBytes/2 || child.used+moved > t.nodeBytes {
+			return false
+		}
+		child.keys = insertAt(child.keys, 0, left.keys[last])
+		child.ids = insertAt(child.ids, 0, left.ids[last])
+		left.keys, left.ids = removeAt(left.keys, last), removeAt(left.ids, last)
+		child.used += moved
+		left.used -= moved
+		parent.replaceSeparator(s, child.keys[0])
+		return true
+	}
+	lent, pulled := sepEntrySize(left.keys[last]), sepEntrySize(parent.keys[s])
+	if left.used-lent < t.nodeBytes/2 || child.used+pulled > t.nodeBytes {
+		return false
+	}
+	child.keys = insertAt(child.keys, 0, parent.keys[s])
+	child.children = insertAt(child.children, 0, left.children[last+1])
+	parent.replaceSeparator(s, left.keys[last])
+	left.keys, left.children = removeAt(left.keys, last), removeAt(left.children, last+1)
+	child.used += pulled
+	left.used -= lent
+	return true
+}
+
+// borrowFromRight moves the first entry of the right sibling into child ci.
+func (t *Tree) borrowFromRight(parent *node, ci int) bool {
+	child, right, s := parent.children[ci], parent.children[ci+1], ci
+	if child.leaf {
+		moved := leafEntrySize(right.keys[0])
+		if right.used-moved < t.nodeBytes/2 || child.used+moved > t.nodeBytes {
+			return false
+		}
+		child.keys = append(child.keys, right.keys[0])
+		child.ids = append(child.ids, right.ids[0])
+		right.keys, right.ids = removeAt(right.keys, 0), removeAt(right.ids, 0)
+		child.used += moved
+		right.used -= moved
+		parent.replaceSeparator(s, right.keys[0])
+		return true
+	}
+	lent, pulled := sepEntrySize(right.keys[0]), sepEntrySize(parent.keys[s])
+	if right.used-lent < t.nodeBytes/2 || child.used+pulled > t.nodeBytes {
+		return false
+	}
+	child.keys = append(child.keys, parent.keys[s])
+	child.children = append(child.children, right.children[0])
+	parent.replaceSeparator(s, right.keys[0])
+	right.keys, right.children = removeAt(right.keys, 0), removeAt(right.children, 0)
+	child.used += pulled
+	right.used -= lent
+	return true
+}
+
+// replaceSeparator swaps parent.keys[s] for key and adjusts the byte count.
+func (n *node) replaceSeparator(s int, key []byte) {
+	n.used += sepEntrySize(key) - sepEntrySize(n.keys[s])
+	n.keys[s] = key
+}
+
+// merge folds child s+1 into child s when they fit in one node, removing
+// separator s from the parent. It reports whether it merged.
+func (t *Tree) merge(parent *node, s int) bool {
+	left, right := parent.children[s], parent.children[s+1]
+	combined := left.used + right.used - nodeHeaderSize
+	if !left.leaf {
+		combined += sepEntrySize(parent.keys[s])
+	}
+	if combined > t.nodeBytes {
+		return false
+	}
+	if left.leaf {
+		left.keys = append(left.keys, right.keys...)
+		left.ids = append(left.ids, right.ids...)
+		left.next = right.next
+	} else {
+		left.keys = append(append(left.keys, parent.keys[s]), right.keys...)
+		left.children = append(left.children, right.children...)
+	}
+	left.used = combined
+	parent.used -= sepEntrySize(parent.keys[s])
+	parent.keys = removeAt(parent.keys, s)
+	parent.children = removeAt(parent.children, s+1)
+	return true
 }
