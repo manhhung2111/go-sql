@@ -8,7 +8,7 @@ sources:
   - .github/workflows/docker.yml
   - .github/workflows/sync-wiki.yml
   - .claude/skills/sync-wiki/SKILL.md
-  - docs/superpowers/specs/2026-10-05-llm-wiki-design.md
+  - docs/specs/2026-10-05-llm-wiki-design.md
   - Makefile
   - pr: 18
   - pr: 23

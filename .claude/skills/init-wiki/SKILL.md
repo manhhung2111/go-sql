@@ -18,7 +18,7 @@ Builds `.wiki/` once so agents can read `.wiki/index.md` instead of re-deriving 
 
 1. **Install tooling.** Create `.wiki/`, copy `SCHEMA.template.md` to `.wiki/SCHEMA.md` and `check-wiki.sh` to `.wiki/check.sh` (`chmod +x`), both from this skill's directory. Create `index.md` and `log.md` (`# Log`) so the checker has them. Read `.wiki/SCHEMA.md` and follow it for everything below.
 
-2. **Survey.** List packages, files and entry points: `CLAUDE.md`, then tokensave. Read the code and its comments. For rationale, run `git log --first-parent --format='%h %s' main` and, for each `(#N)` in a subject, `gh pr view N --json title,body,comments,reviews` (bound network calls; if `gh` is unavailable or unauthenticated, continue with git only and say rationale will be thin). Read `plan/` if it exists, as a hint to confirm against code or a PR. Never cite it.
+2. **Survey.** List packages, files and entry points: `CLAUDE.md`, then tokensave. Read the code and its comments. For rationale, run `git log --first-parent --format='%h %s' main` and, for each `(#N)` in a subject, `gh pr view N --json title,body,comments,reviews` (bound network calls; if `gh` is unavailable or unauthenticated, continue with git only and say rationale will be thin). Read `docs/plans/` if it exists, as a hint to confirm against code or a PR. Never cite it.
 
 3. **Record the marker SHA now.** `sha="$(git rev-parse --short=7 main)"`. This is the commit the wiki is read from.
 
@@ -37,5 +37,5 @@ Builds `.wiki/` once so agents can read `.wiki/index.md` instead of re-deriving 
 
 - Commit, push or open a PR.
 - Write outside `.wiki/` apart from the single `CLAUDE.md` pointer line.
-- Cite `plan/`, invent rationale, or write a claim you could not trace to code, a comment, a commit or a PR.
+- Cite `docs/plans/`, invent rationale, or write a claim you could not trace to code, a comment, a commit or a PR.
 - Delete files under `.wiki/`.
