@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"iter"
 )
@@ -19,6 +21,10 @@ type Row struct {
 	Bytes []byte
 }
 
+// ErrRowNotFound is returned by Get when no live row has the given address:
+// the page or slot does not exist, or the row was deleted.
+var ErrRowNotFound = errors.New("row not found")
+
 // File is a heap file: a sequence of 16KiB slotted pages. Insert and Delete
 // write the affected page straight through but do not fsync — the caller
 // calls Sync once at the end of a statement, so a many-row statement pays
@@ -31,6 +37,11 @@ type Row struct {
 type File interface {
 	Insert(rowBytes []byte) (RowID, error)
 	Delete(id RowID) error
+	// Get returns a copy of the row at id. It fails with an error wrapping
+	// ErrRowNotFound if there is no live row there, and with another error if
+	// the page cannot be read or fails verification. Like Scan, any number of
+	// Gets may run concurrently with each other and with Scans.
+	Get(id RowID) ([]byte, error)
 	// Scan yields every live row in page order, verifying each page's
 	// checksum as it goes. A corrupt page ends the iteration with its error.
 	Scan() iter.Seq2[Row, error]
@@ -193,6 +204,33 @@ func (f *sqlFile) Scan() iter.Seq2[Row, error] {
 			}
 		}
 	}
+}
+
+func (f *sqlFile) Get(id RowID) ([]byte, error) {
+	numPages := f.pages.NumPages()
+	if id.Page < 0 || id.Page >= numPages {
+		return nil, fmt.Errorf("%w: page %d out of range [0, %d)", ErrRowNotFound, id.Page, numPages)
+	}
+
+	// Read straight from the page file, like Scan: the tail cache equals the
+	// disk, so the result is the same and Get touches no mutable state.
+	buf, err := f.pages.ReadPage(id.Page)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateLayout(buf); err != nil {
+		return nil, fmt.Errorf("page %d: %w", id.Page, err)
+	}
+
+	page := &sqlSlottedPage{buf: buf}
+	if id.Slot < 0 || id.Slot >= page.SlotCount() {
+		return nil, fmt.Errorf("%w: page %d slot %d out of range [0, %d)", ErrRowNotFound, id.Page, id.Slot, page.SlotCount())
+	}
+	row, live := page.Row(id.Slot)
+	if !live {
+		return nil, fmt.Errorf("%w: page %d slot %d is deleted", ErrRowNotFound, id.Page, id.Slot)
+	}
+	return bytes.Clone(row), nil
 }
 
 func (f *sqlFile) Sync() error { return f.pages.Sync() }
