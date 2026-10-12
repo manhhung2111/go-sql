@@ -3,6 +3,9 @@ package index
 import (
 	"bytes"
 	"fmt"
+	"math/rand"
+	"slices"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -169,4 +172,108 @@ func TestTree_EmptyKeyIsValid(t *testing.T) {
 	assert.True(t, found)
 	assert.Equal(t, rid(1), got)
 	check(t, tree)
+}
+
+func TestTree_BulkInsertSplitsAndKeepsEveryKey(t *testing.T) {
+	orders := map[string]func(i, n int) int{
+		"ascending":  func(i, n int) int { return i },
+		"descending": func(i, n int) int { return n - 1 - i },
+		"shuffled": func() func(i, n int) int {
+			perm := rand.New(rand.NewSource(7)).Perm(500)
+			return func(i, n int) int { return perm[i] }
+		}(),
+	}
+	for name, at := range orders {
+		t.Run(name, func(t *testing.T) {
+			const n = 500
+			tree := newTestTree(t)
+			for i := 0; i < n; i++ {
+				require.NoError(t, tree.Insert(key(at(i, n)), rid(at(i, n))))
+				check(t, tree)
+			}
+			assert.Equal(t, n, tree.Len())
+			assert.False(t, tree.root.leaf, "500 keys must not fit in one 96-byte leaf")
+			for i := 0; i < n; i++ {
+				got, found := tree.Get(key(i))
+				require.True(t, found, "key %d missing", i)
+				assert.Equal(t, rid(i), got)
+			}
+		})
+	}
+}
+
+// model is the reference implementation the property test compares against.
+type model struct {
+	keys [][]byte
+	ids  []storage.RowID
+}
+
+func (m *model) find(key []byte) (int, bool) {
+	i := sort.Search(len(m.keys), func(i int) bool { return bytes.Compare(m.keys[i], key) >= 0 })
+	return i, i < len(m.keys) && bytes.Equal(m.keys[i], key)
+}
+
+func (m *model) insert(key []byte, id storage.RowID) bool {
+	i, found := m.find(key)
+	if found {
+		return false
+	}
+	m.keys = slices.Insert(m.keys, i, slices.Clone(key))
+	m.ids = slices.Insert(m.ids, i, id)
+	return true
+}
+
+func (m *model) delete(key []byte) bool {
+	i, found := m.find(key)
+	if !found {
+		return false
+	}
+	m.keys = slices.Delete(m.keys, i, i+1)
+	m.ids = slices.Delete(m.ids, i, i+1)
+	return true
+}
+
+func (m *model) rangeOf(lo, hi []byte) (keys [][]byte, ids []storage.RowID) {
+	for i, k := range m.keys {
+		if lo != nil && bytes.Compare(k, lo) < 0 {
+			continue
+		}
+		if hi != nil && bytes.Compare(k, hi) >= 0 {
+			continue
+		}
+		keys, ids = append(keys, k), append(ids, m.ids[i])
+	}
+	return keys, ids
+}
+
+func TestTree_InsertsMatchTheModel(t *testing.T) {
+	rng := rand.New(rand.NewSource(11))
+	tree := newTestTree(t)
+	var m model
+	for op := 0; op < 3000; op++ {
+		k := randomKey(rng, tree.MaxKeyLen())
+		err := tree.Insert(k, rid(op))
+		if m.insert(k, rid(op)) {
+			require.NoError(t, err)
+		} else {
+			require.ErrorIs(t, err, ErrDuplicateKey)
+		}
+		check(t, tree)
+	}
+	require.Equal(t, len(m.keys), tree.Len())
+	for i, k := range m.keys {
+		got, found := tree.Get(k)
+		require.True(t, found)
+		require.Equal(t, m.ids[i], got)
+	}
+}
+
+// randomKey draws from a three-letter alphabet so keys share prefixes and
+// collide often, with lengths from 0 up to max.
+func randomKey(rng *rand.Rand, max int) []byte {
+	k := make([]byte, rng.Intn(max+1))
+	for i := range k {
+		k[i] = byte('a' + rng.Intn(3))
+	}
+	return k
 }

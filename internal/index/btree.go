@@ -56,6 +56,14 @@ type node struct {
 
 func newLeaf() *node { return &node{leaf: true, used: nodeHeaderSize} }
 
+// recount recomputes used from the node's contents.
+func (n *node) recount() {
+	n.used = nodeHeaderSize
+	for i := range n.keys {
+		n.used += n.entrySize(i)
+	}
+}
+
 func (n *node) entrySize(i int) int {
 	if n.leaf {
 		return leafEntrySize(n.keys[i])
@@ -126,15 +134,105 @@ func (t *Tree) Insert(key []byte, id storage.RowID) error {
 	if len(key) > t.maxKey {
 		return fmt.Errorf("key of %d bytes exceeds the maximum of %d: %w", len(key), t.maxKey, ErrKeyTooLong)
 	}
-	leaf := t.root // the root stays a leaf until Task 2 adds splits
-	i, found := leaf.search(key)
-	if found {
-		return fmt.Errorf("key %x already exists: %w", key, ErrDuplicateKey)
+	sep, right, err := t.insert(t.root, slices.Clone(key), id)
+	if err != nil {
+		return err
 	}
-	key = slices.Clone(key)
-	leaf.keys = insertAt(leaf.keys, i, key)
-	leaf.ids = insertAt(leaf.ids, i, id)
-	leaf.used += leafEntrySize(key)
+	if right != nil {
+		t.growRoot(sep, right)
+	}
 	t.size++
 	return nil
+}
+
+// growRoot makes a new root over the old root and right, which it was split from.
+func (t *Tree) growRoot(sep []byte, right *node) {
+	root := &node{keys: [][]byte{sep}, children: []*node{t.root, right}}
+	root.recount()
+	t.root = root
+}
+
+// insert adds key below n. If n overflows and splits, it returns the separator
+// to add to n's parent and the new right sibling.
+func (t *Tree) insert(n *node, key []byte, id storage.RowID) ([]byte, *node, error) {
+	if n.leaf {
+		i, found := n.search(key)
+		if found {
+			return nil, nil, fmt.Errorf("key %x already exists: %w", key, ErrDuplicateKey)
+		}
+		n.keys = insertAt(n.keys, i, key)
+		n.ids = insertAt(n.ids, i, id)
+		n.used += leafEntrySize(key)
+		if n.used <= t.nodeBytes {
+			return nil, nil, nil
+		}
+		sep, right := t.splitLeaf(n)
+		return sep, right, nil
+	}
+
+	ci := n.childIndex(key)
+	sep, right, err := t.insert(n.children[ci], key, id)
+	if err != nil || right == nil {
+		return nil, nil, err
+	}
+	n.adoptSplit(ci, sep, right)
+	if n.used <= t.nodeBytes {
+		return nil, nil, nil
+	}
+	sep, right = t.splitInternal(n)
+	return sep, right, nil
+}
+
+// adoptSplit records that child ci split, giving sep and its new right sibling.
+func (n *node) adoptSplit(ci int, sep []byte, right *node) {
+	n.keys = insertAt(n.keys, ci, sep)
+	n.children = insertAt(n.children, ci+1, right)
+	n.used += sepEntrySize(sep)
+}
+
+// splitPoint returns the first index at which the entries before it hold at
+// least half of n's entry bytes, clamped to [lo, hi].
+func (n *node) splitPoint(lo, hi int) int {
+	total := n.used - nodeHeaderSize
+	acc := 0
+	for i := 0; i < hi; i++ {
+		acc += n.entrySize(i)
+		if acc*2 >= total {
+			return max(i+1, lo)
+		}
+	}
+	return hi
+}
+
+// splitLeaf moves the upper entries of n to a new right leaf and returns the
+// separator (a copy of the right leaf's first key) with that leaf.
+func (t *Tree) splitLeaf(n *node) ([]byte, *node) {
+	at := n.splitPoint(1, len(n.keys)-1)
+	right := newLeaf()
+	right.keys = slices.Clone(n.keys[at:])
+	right.ids = slices.Clone(n.ids[at:])
+	right.next = n.next
+	clear(n.keys[at:])
+	n.keys, n.ids = n.keys[:at], n.ids[:at]
+	n.next = right
+	n.recount()
+	right.recount()
+	return right.keys[0], right
+}
+
+// splitInternal moves the upper separators of n to a new right node. The
+// middle separator moves up to the parent and stays in neither half.
+func (t *Tree) splitInternal(n *node) ([]byte, *node) {
+	at := n.splitPoint(1, len(n.keys)-2)
+	sep := n.keys[at]
+	right := &node{
+		keys:     slices.Clone(n.keys[at+1:]),
+		children: slices.Clone(n.children[at+1:]),
+	}
+	clear(n.keys[at:])
+	clear(n.children[at+1:])
+	n.keys, n.children = n.keys[:at], n.children[:at+1]
+	n.recount()
+	right.recount()
+	return sep, right
 }
