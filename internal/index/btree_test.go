@@ -400,3 +400,69 @@ func TestTree_StaleSeparatorStillGivesNotFoundAndAllowsReinsert(t *testing.T) {
 	assert.Equal(t, rid(n), got)
 	check(t, tree)
 }
+
+// TestTree_MatchesTheModel drives random operations against the tree and a
+// sorted slice and requires them to agree after every step.
+func TestTree_MatchesTheModel(t *testing.T) {
+	phases := []struct {
+		name                 string
+		seed                 int64
+		ops                  int
+		insertPct, deletePct int
+	}{
+		{"balanced", 21, 2500, 45, 35},
+		{"grow then shrink", 22, 2500, 70, 10},
+		{"delete heavy", 23, 2500, 25, 60},
+	}
+	for _, ph := range phases {
+		t.Run(ph.name, func(t *testing.T) {
+			rng := rand.New(rand.NewSource(ph.seed))
+			tree := newTestTree(t)
+			var m model
+			for op := 0; op < ph.ops; op++ {
+				switch pick := rng.Intn(100); {
+				case pick < ph.insertPct:
+					k := randomKey(rng, tree.MaxKeyLen())
+					err := tree.Insert(k, rid(op))
+					if m.insert(k, rid(op)) {
+						require.NoError(t, err)
+					} else {
+						require.ErrorIs(t, err, ErrDuplicateKey)
+					}
+				case pick < ph.insertPct+ph.deletePct:
+					var k []byte
+					if len(m.keys) > 0 && rng.Intn(10) < 8 {
+						k = m.keys[rng.Intn(len(m.keys))]
+					} else {
+						k = randomKey(rng, tree.MaxKeyLen())
+					}
+					require.Equal(t, m.delete(k), tree.Delete(k), "delete %x", k)
+				default:
+					k := randomKey(rng, tree.MaxKeyLen())
+					i, want := m.find(k)
+					got, found := tree.Get(k)
+					require.Equal(t, want, found)
+					if want {
+						require.Equal(t, m.ids[i], got)
+					}
+					lo, hi := randomKey(rng, 4), randomKey(rng, 4)
+					if rng.Intn(4) == 0 {
+						lo = nil
+					}
+					if rng.Intn(4) == 0 {
+						hi = nil
+					}
+					gotKeys, gotIDs := collect(tree, lo, hi)
+					wantKeys, wantIDs := m.rangeOf(lo, hi)
+					require.Equal(t, len(wantKeys), len(gotKeys), "range [%x, %x)", lo, hi)
+					for i := range wantKeys {
+						require.Equal(t, wantKeys[i], gotKeys[i])
+						require.Equal(t, wantIDs[i], gotIDs[i])
+					}
+				}
+				require.Equal(t, len(m.keys), tree.Len())
+				check(t, tree)
+			}
+		})
+	}
+}
