@@ -334,10 +334,12 @@ func (t *SqlTable) existingKeys(candidates map[int]map[any]bool) (map[int]map[an
 	return found, nil
 }
 
-// appendToFile writes rows to the table's file with a single fsync. Every
-// row is encoded and size-checked before the first write, so a bad batch
-// writes nothing; only an I/O error can leave it partly written, and the
-// engine has no WAL to undo that. Callers hold t.mu.
+// appendToFile writes rows to the table's file with a single fsync and then
+// records them in the table's indexes. Every row is encoded and size-checked
+// before the first write, so a bad batch writes nothing; only an I/O error can
+// leave it partly written, and the engine has no WAL to undo that. Such an
+// error discards the indexes, so they are rebuilt from whatever the file now
+// holds. Callers hold t.mu.
 func (t *SqlTable) appendToFile(rows [][]any) error {
 	if t.file == nil {
 		return fmt.Errorf("table %q is closed", t.Name)
@@ -348,12 +350,21 @@ func (t *SqlTable) appendToFile(rows [][]any) error {
 		return err
 	}
 
+	ids := make([]storage.RowID, 0, len(encoded))
 	for _, b := range encoded {
-		if _, err := t.file.Insert(b); err != nil {
+		id, err := t.file.Insert(b)
+		if err != nil {
+			t.dropIndexes()
 			return err
 		}
+		ids = append(ids, id)
 	}
-	return t.file.Sync()
+	if err := t.file.Sync(); err != nil {
+		t.dropIndexes()
+		return err
+	}
+	t.indexInserted(ids, rows)
+	return nil
 }
 
 // encodeRows encodes every row with columns and rejects any that cannot fit
@@ -704,17 +715,22 @@ func (t *SqlTable) Delete(where parser.Expression) error {
 }
 
 // deleteFromFile tombstones every live row of the table's file that matches
-// where, then fsyncs once. The matching rows are collected before the first
-// tombstone is written, so an evaluation error touches nothing, and a row is
-// never tombstoned while the scan is still reading its page; only an I/O error
-// can leave the delete partly applied, and the engine has no WAL to undo that.
-// Callers hold t.mu.
+// where, then fsyncs once, then removes the rows from the table's indexes.
+// The matching rows are collected before the first tombstone is written, so
+// an evaluation error touches nothing, and a row is never tombstoned while
+// the scan is still reading its page; only an I/O error can leave the delete
+// partly applied, and the engine has no WAL to undo that. Such an error
+// discards the indexes. Callers hold t.mu.
 func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[string]int) error {
 	if t.file == nil {
 		return fmt.Errorf("table %q is closed", t.Name)
 	}
 
+	// Only the key values of the matching rows are kept, and only if there is
+	// an index to update.
+	trackKeys := t.builtIndexes() != nil
 	var matched []storage.RowID
+	var keys [][]any
 	for row, err := range t.file.Scan() {
 		if err != nil {
 			return err
@@ -729,15 +745,24 @@ func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[strin
 		}
 		if isMatch {
 			matched = append(matched, row.ID)
+			if trackKeys {
+				keys = append(keys, t.keyValues(decoded))
+			}
 		}
 	}
 
 	for _, id := range matched {
 		if err := t.file.Delete(id); err != nil {
+			t.dropIndexes()
 			return err
 		}
 	}
-	return t.file.Sync()
+	if err := t.file.Sync(); err != nil {
+		t.dropIndexes()
+		return err
+	}
+	t.indexDeleted(keys)
+	return nil
 }
 
 // resolvedAssignment is an Assignment resolved to its schema index and
@@ -761,6 +786,8 @@ type resolvedAssignment struct {
 // coercion error, a uniqueness violation, a row too large for a page) leaves
 // the table untouched, and a crash between the two writes can duplicate a row
 // but never lose one.
+// An I/O error during the writes discards the indexes; otherwise every updated
+// row is re-pointed at its new RowID.
 func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expression) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -799,12 +826,13 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 		}
 	}
 
+	// If the indexes are built, remember each matched row's old key values so
+	// they can be removed after the write.
+	trackKeys := t.builtIndexes() != nil
+
 	var oldIDs []storage.RowID
+	var oldKeys [][]any
 	var updated [][]any
-	// A unique column is in conflict when a row that is NOT being updated
-	// already holds the assigned value. A matched row's own old value is
-	// deliberately excluded, so re-assigning a column back to its current
-	// value never self-conflicts.
 	conflicts := make(map[int]bool, len(uniqueColumns))
 	for fileRow, err := range t.file.Scan() {
 		if err != nil {
@@ -819,6 +847,10 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 			return err
 		}
 		if !matched {
+			// A column with an index is checked after the scan; one without
+			// is checked here. A matched row's own old value is deliberately
+			// excluded, so re-assigning a column back to its current value
+			// never self-conflicts.
 			for _, idx := range uniqueColumns {
 				if row[idx] != nil && row[idx] == assigned[idx] {
 					conflicts[idx] = true
@@ -827,6 +859,9 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 			continue
 		}
 		oldIDs = append(oldIDs, fileRow.ID)
+		if trackKeys {
+			oldKeys = append(oldKeys, t.keyValues(row))
+		}
 		for _, a := range resolved {
 			row[a.index] = a.value
 		}
@@ -852,17 +887,27 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 	if err != nil {
 		return err
 	}
+	newIDs := make([]storage.RowID, 0, len(encoded))
 	for _, b := range encoded {
-		if _, err := t.file.Insert(b); err != nil {
+		id, err := t.file.Insert(b)
+		if err != nil {
+			t.dropIndexes()
 			return err
 		}
+		newIDs = append(newIDs, id)
 	}
 	for _, id := range oldIDs {
 		if err := t.file.Delete(id); err != nil {
+			t.dropIndexes()
 			return err
 		}
 	}
-	return t.file.Sync()
+	if err := t.file.Sync(); err != nil {
+		t.dropIndexes()
+		return err
+	}
+	t.indexMoved(oldKeys, updated, newIDs)
+	return nil
 }
 
 // Rename records the table's new name in the catalog and then sets it; called
@@ -895,6 +940,7 @@ func (t *SqlTable) Close() error {
 }
 
 func (t *SqlTable) closeLocked() error {
+	t.dropIndexes()
 	if t.file == nil {
 		return nil
 	}

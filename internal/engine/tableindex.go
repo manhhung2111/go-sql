@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"manhhung2111/go-sql/internal/index"
+	"manhhung2111/go-sql/internal/storage"
 )
 
 // maxKeyLen is the longest PRIMARY KEY/UNIQUE string the indexes can hold.
@@ -146,4 +147,97 @@ func (t *SqlTable) buildIndexes() (map[int]*index.Tree, error) {
 		}
 	}
 	return trees, nil
+}
+
+// indexInserted records rows just written to the file at ids. A built index
+// that cannot take an entry is discarded, never left half updated.
+func (t *SqlTable) indexInserted(ids []storage.RowID, rows [][]any) {
+	trees := t.builtIndexes()
+	if trees == nil {
+		return
+	}
+	for col, tree := range trees {
+		if tree == nil {
+			continue
+		}
+		for i, row := range rows {
+			if row[col] == nil {
+				continue
+			}
+			key, err := index.EncodeKey(row[col])
+			if err == nil {
+				err = tree.Insert(key, ids[i])
+			}
+			if err != nil {
+				t.dropIndexes()
+				return
+			}
+		}
+	}
+}
+
+// indexDeleted removes rows just tombstoned. keys[i] holds row i's values at
+// the key columns, in keyColumns order. An entry that is missing means the
+// index was wrong, so it is discarded.
+func (t *SqlTable) indexDeleted(keys [][]any) {
+	trees := t.builtIndexes()
+	if trees == nil {
+		return
+	}
+	if !t.removeKeys(trees, keys) {
+		t.dropIndexes()
+	}
+}
+
+// indexMoved records an UPDATE: every updated row got a new RowID, so its old
+// entries (oldKeys, as in indexDeleted) are removed first and the new values
+// are added at the new ids. Unchanged keys are re-pointed too.
+func (t *SqlTable) indexMoved(oldKeys [][]any, rows [][]any, ids []storage.RowID) {
+	trees := t.builtIndexes()
+	if trees == nil {
+		return
+	}
+	if !t.removeKeys(trees, oldKeys) {
+		t.dropIndexes()
+		return
+	}
+	for col, tree := range trees {
+		if tree == nil {
+			continue
+		}
+		for i, row := range rows {
+			if row[col] == nil {
+				continue
+			}
+			key, err := index.EncodeKey(row[col])
+			if err == nil {
+				err = tree.Insert(key, ids[i])
+			}
+			if err != nil {
+				t.dropIndexes()
+				return
+			}
+		}
+	}
+}
+
+// removeKeys deletes each row's entries from trees and reports whether every
+// entry was there.
+func (t *SqlTable) removeKeys(trees map[int]*index.Tree, keys [][]any) bool {
+	for j, col := range t.keyColumns() {
+		tree := trees[col]
+		if tree == nil {
+			continue
+		}
+		for _, values := range keys {
+			if values[j] == nil {
+				continue
+			}
+			key, err := index.EncodeKey(values[j])
+			if err != nil || !tree.Delete(key) {
+				return false
+			}
+		}
+	}
+	return true
 }
