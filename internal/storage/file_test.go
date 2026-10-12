@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -497,5 +498,211 @@ func TestSqlFile_ScansMayRunConcurrently(t *testing.T) {
 			assert.Equal(t, n, count)
 		}()
 	}
+	wg.Wait()
+}
+
+func TestSqlFile_Get(t *testing.T) {
+	t.Run("returns each row by the id Insert gave, before and after a reopen", func(t *testing.T) {
+		f, path := newTestFile(t)
+		const n = 3000 // about 13 bytes a row with its slot, so a few pages
+		ids := make([]RowID, n)
+		for i := 0; i < n; i++ {
+			id, err := f.Insert([]byte("row-" + strconv.Itoa(i)))
+			require.NoError(t, err)
+			ids[i] = id
+		}
+		require.Greater(t, ids[n-1].Page, int32(0), "the rows must span several pages")
+
+		for i, id := range ids {
+			got, err := f.Get(id)
+			require.NoError(t, err)
+			require.Equal(t, "row-"+strconv.Itoa(i), string(got))
+		}
+
+		require.NoError(t, f.Close())
+		reopened, err := OpenFile(path)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = reopened.Close() })
+		for i, id := range ids {
+			got, err := reopened.Get(id)
+			require.NoError(t, err)
+			require.Equal(t, "row-"+strconv.Itoa(i), string(got))
+		}
+	})
+
+	t.Run("an empty row is a live row and comes back as an empty non-nil slice", func(t *testing.T) {
+		f, _ := newTestFile(t)
+		id, err := f.Insert([]byte{})
+		require.NoError(t, err)
+
+		got, err := f.Get(id)
+
+		require.NoError(t, err)
+		assert.NotNil(t, got)
+		assert.Empty(t, got)
+	})
+
+	t.Run("an address with no live row is ErrRowNotFound", func(t *testing.T) {
+		f, _ := newTestFile(t)
+		deleted, err := f.Insert([]byte("a"))
+		require.NoError(t, err)
+		_, err = f.Insert([]byte("b"))
+		require.NoError(t, err)
+		require.NoError(t, f.Delete(deleted))
+
+		tests := []struct {
+			name    string
+			id      RowID
+			wantMsg string
+		}{
+			{"a deleted row", deleted, "page 0 slot 0 is deleted"},
+			{"a slot at the slot count", RowID{Page: 0, Slot: 2}, "page 0 slot 2 out of range [0, 2)"},
+			{"a negative slot", RowID{Page: 0, Slot: -1}, "page 0 slot -1 out of range [0, 2)"},
+			{"a page at NumPages", RowID{Page: 1, Slot: 0}, "page 1 out of range [0, 1)"},
+			{"a negative page", RowID{Page: -1, Slot: 0}, "page -1 out of range [0, 1)"},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				got, err := f.Get(tc.id)
+
+				require.ErrorIs(t, err, ErrRowNotFound)
+				assert.ErrorContains(t, err, tc.wantMsg)
+				assert.Nil(t, got)
+			})
+		}
+	})
+
+	t.Run("any address in an empty file is ErrRowNotFound", func(t *testing.T) {
+		f, _ := newTestFile(t)
+
+		_, err := f.Get(RowID{Page: 0, Slot: 0})
+
+		assert.ErrorIs(t, err, ErrRowNotFound)
+	})
+
+	t.Run("deleting a row leaves its neighbours readable", func(t *testing.T) {
+		f, _ := newTestFile(t)
+		a, err := f.Insert([]byte("a"))
+		require.NoError(t, err)
+		b, err := f.Insert([]byte("b"))
+		require.NoError(t, err)
+		c, err := f.Insert([]byte("c"))
+		require.NoError(t, err)
+		require.NoError(t, f.Delete(b))
+
+		for id, want := range map[RowID]string{a: "a", c: "c"} {
+			got, err := f.Get(id)
+			require.NoError(t, err)
+			assert.Equal(t, want, string(got))
+		}
+	})
+
+	t.Run("a corrupt page is an error but not ErrRowNotFound", func(t *testing.T) {
+		f, path := newTestFile(t)
+		id, err := f.Insert([]byte("a"))
+		require.NoError(t, err)
+
+		raw, err := os.OpenFile(path, os.O_RDWR, 0)
+		require.NoError(t, err)
+		_, err = raw.WriteAt([]byte{0xFF}, maxPageSize-1) // last byte of page 0
+		require.NoError(t, err)
+		require.NoError(t, raw.Close())
+
+		_, err = f.Get(id)
+
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrRowNotFound)
+		assert.ErrorContains(t, err, "checksum mismatch")
+	})
+
+	t.Run("a damaged slot under a valid checksum is an error, not a stale address", func(t *testing.T) {
+		f, path := newTestFile(t)
+		id, err := f.Insert([]byte("abc"))
+		require.NoError(t, err)
+
+		// Stretch slot 0's length past the end of the page, then re-stamp the
+		// checksum so that only the layout check can notice.
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		binary.LittleEndian.PutUint16(raw[pageHeaderSize+2:], 500)
+		stampPage(raw[:maxPageSize], 0)
+		require.NoError(t, os.WriteFile(path, raw, 0644))
+
+		got, err := f.Get(id)
+
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrRowNotFound)
+		assert.ErrorContains(t, err, "outside row area")
+		assert.Nil(t, got)
+	})
+
+	t.Run("the returned bytes belong to the caller, even over a cached page file", func(t *testing.T) {
+		// A cached page file hands out one shared, immutable buffer per page,
+		// so a Get that returned a view into it would let the caller corrupt
+		// the cache.
+		inner, err := CreatePageFile(filepath.Join(t.TempDir(), "table.tbl"))
+		require.NoError(t, err)
+		cached, err := NewCachedPageFile(inner, 4)
+		require.NoError(t, err)
+		f := &sqlFile{pages: cached}
+		t.Cleanup(func() { _ = f.Close() })
+		id, err := f.Insert([]byte("abc"))
+		require.NoError(t, err)
+
+		first, err := f.Get(id)
+		require.NoError(t, err)
+		require.Equal(t, "abc", string(first))
+		first[0] = 'X'
+		second, err := f.Get(id)
+
+		require.NoError(t, err)
+		assert.Equal(t, "abc", string(second))
+	})
+}
+
+// Get holds only the table's read lock, like Scan, so Gets and Scans of one
+// file can run at once. This is meaningful under -race.
+func TestSqlFile_GetsMayRunConcurrentlyWithScans(t *testing.T) {
+	f, path := newTestFile(t)
+	const n = 3000
+	ids := make([]RowID, n)
+	for i := 0; i < n; i++ {
+		id, err := f.Insert([]byte("row-" + strconv.Itoa(i)))
+		require.NoError(t, err)
+		ids[i] = id
+	}
+	// Reopen so the tail cache is empty: a Get that loaded it would then write
+	// shared state, which the race detector catches.
+	require.NoError(t, f.Close())
+	f, err := OpenFile(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = f.Close() })
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := g; i < n; i += 8 {
+				got, err := f.Get(ids[i])
+				if !assert.NoError(t, err) {
+					return
+				}
+				assert.Equal(t, "row-"+strconv.Itoa(i), string(got))
+			}
+		}(g)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		count := 0
+		for _, err := range f.Scan() {
+			if !assert.NoError(t, err) {
+				return
+			}
+			count++
+		}
+		assert.Equal(t, n, count)
+	}()
 	wg.Wait()
 }
