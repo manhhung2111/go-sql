@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"iter"
 	"slices"
 	"sort"
 
@@ -235,4 +236,28 @@ func (t *Tree) splitInternal(n *node) ([]byte, *node) {
 	n.recount()
 	right.recount()
 	return sep, right
+}
+
+// Range yields the keys in [lo, hi) in order. A nil lo starts at the first
+// key and a nil hi runs to the last; a non-nil empty hi is an empty range.
+// Yielded keys are valid until the tree is next modified. The tree must not be
+// modified while iterating.
+func (t *Tree) Range(lo, hi []byte) iter.Seq2[[]byte, storage.RowID] {
+	return func(yield func([]byte, storage.RowID) bool) {
+		n := t.root
+		for !n.leaf {
+			n = n.children[n.childIndex(lo)]
+		}
+		i, _ := n.search(lo)
+		for ; n != nil; n, i = n.next, 0 {
+			for ; i < len(n.keys); i++ {
+				if hi != nil && bytes.Compare(n.keys[i], hi) >= 0 {
+					return
+				}
+				if !yield(n.keys[i], n.ids[i]) {
+					return
+				}
+			}
+		}
+	}
 }

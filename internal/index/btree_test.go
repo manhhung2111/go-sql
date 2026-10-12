@@ -277,3 +277,67 @@ func randomKey(rng *rand.Rand, max int) []byte {
 	}
 	return k
 }
+
+func collect(tree *Tree, lo, hi []byte) (keys [][]byte, ids []storage.RowID) {
+	for k, id := range tree.Range(lo, hi) {
+		keys, ids = append(keys, slices.Clone(k)), append(ids, id)
+	}
+	return keys, ids
+}
+
+func filled(t *testing.T, n int) *Tree {
+	t.Helper()
+	tree := newTestTree(t)
+	for i := 0; i < n; i++ {
+		require.NoError(t, tree.Insert(key(i), rid(i)))
+	}
+	return tree
+}
+
+func TestTree_RangeBounds(t *testing.T) {
+	tree := filled(t, 200)
+	tests := []struct {
+		name     string
+		lo, hi   []byte
+		from, to int // expected keys are key(from) .. key(to-1)
+	}{
+		{"everything", nil, nil, 0, 200},
+		{"half open", key(10), key(20), 10, 20},
+		{"lo only", key(190), nil, 190, 200},
+		{"hi only", nil, key(5), 0, 5},
+		{"lo equals hi", key(50), key(50), 0, 0},
+		{"lo between keys", []byte("k00010a"), key(13), 11, 13},
+		{"lo past the last key", []byte("z"), nil, 0, 0},
+		{"hi before the first key", nil, []byte("a"), 0, 0},
+		{"non-nil empty hi is empty", nil, []byte{}, 0, 0},
+		{"non-nil empty lo is unbounded", []byte{}, key(3), 0, 3},
+		{"spans many leaves", key(3), key(197), 3, 197},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			keys, ids := collect(tree, tc.lo, tc.hi)
+			require.Len(t, keys, tc.to-tc.from)
+			for i := range keys {
+				assert.Equal(t, key(tc.from+i), keys[i])
+				assert.Equal(t, rid(tc.from+i), ids[i])
+			}
+		})
+	}
+}
+
+func TestTree_RangeStopsWhenTheConsumerBreaks(t *testing.T) {
+	tree := filled(t, 100)
+	seen := 0
+	for range tree.Range(nil, nil) {
+		seen++
+		if seen == 3 {
+			break
+		}
+	}
+	assert.Equal(t, 3, seen)
+}
+
+func TestTree_RangeOnAnEmptyTree(t *testing.T) {
+	keys, _ := collect(newTestTree(t), nil, nil)
+	assert.Empty(t, keys)
+}
