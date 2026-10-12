@@ -23,7 +23,7 @@ Decisions already made for the whole effort:
 - **Unique keys only.** `Insert` of an existing key fails and changes nothing.
 - **Keys are the codec's `[]byte`; values are `storage.RowID`.** `internal/index` therefore imports `internal/storage`. `storage` never imports `index`.
 - **No internal locking.** The owning `Table.mu` guards the tree: reads under the read lock, mutations under the write lock.
-- **Stale separators are allowed.** A separator is a signpost that divides a node's left subtree (`< S`) from its right subtree (`>= S`); it is not a row. Delete changes only the leaf (plus the rebalancing it triggers) and may leave a separator whose row is gone. A search for that key still returns not found, because the leaf decides. The separator disappears when the two nodes around it merge. Rewriting ancestors on every delete would touch several nodes (several pages on disk) to save a few bytes.
+- **Stale separators are allowed.** A separator is a signpost that divides a node's left subtree (`< S`) from its right subtree (`>= S`); it is not a row. Delete changes only the leaf (plus the rebalancing it triggers, which can split a parent) and may leave a separator whose row is gone. A search for that key still returns not found, because the leaf decides. The separator disappears when the two nodes around it merge. Rewriting ancestors on every delete would touch several nodes (several pages on disk) to save a few bytes.
 - **No minimum-fill guarantee.** With variable-length keys, "at least half full" cannot always be met, so the invariants check structure and byte accounting, not fill.
 
 ## Design
@@ -93,6 +93,8 @@ Remove the key from its leaf and subtract its size from `used`. The root may be 
 
 When the root is an internal node with no separators, its only child becomes the root.
 
+Borrowing replaces a parent separator with a key from the sibling, which can be longer than the old separator. If that pushes the parent over the budget, the parent splits exactly as it does on insert, and the split propagates upward (growing a new root if the old root splits). Without this, a nearly empty internal node could be stuck: it cannot merge because the sibling is almost full, and it cannot borrow because the parent has no room for the longer separator. With it, one of borrow or merge always succeeds for a node with no entries: if a merge does not fit, the sibling is within a quarter of the budget of full, so it can lend an entry and stay at least half full.
+
 ### Invariants (checked in tests)
 
 An unexported `check()` verifies after every operation: keys within a node are strictly increasing; for each separator `S`, every key in the left subtree is `< S` and every key in the right subtree is `>= S`; all leaves are at the same depth; the leaf chain visits every leaf once, in order; each node's `used` equals the sum of its entries and the header and is at most `nodeBytes`; no non-root leaf is empty and no non-root internal node is without a separator; and `Len` equals the number of leaf entries.
@@ -128,4 +130,4 @@ Pure Go with `testify` in `internal/index`. Every test is seen failing first (ag
 
 ## Open questions
 
-- Whether the borrow-then-merge rule can leave an under-full node that holds no entry. The invariants forbid it and the property test with a tiny node is the proof; if it finds a counterexample, the plan records a ruling on the tightest fix.
+None blocking.
