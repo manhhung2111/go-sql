@@ -38,5 +38,5 @@ Brings `.wiki/` up to date with `main`. It edits the working tree and proposes a
 
 - Commit, push or open a PR (that is `/create-pr`).
 - Write outside `.wiki/`.
-- Guess a commit range, delete a decision page, cite `plan/`, or write a claim you could not trace to code, a comment, a commit or a PR.
+- Guess a commit range, delete a decision page, cite `docs/plans/`, or write a claim you could not trace to code, a comment, a commit or a PR.
 - Write anything when there is nothing to ingest: running twice with no new merges changes nothing.

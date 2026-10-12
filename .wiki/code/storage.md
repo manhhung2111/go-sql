@@ -3,7 +3,7 @@ title: internal/storage
 kind: code
 sources:
   - internal/storage/
-  - docs/superpowers/specs/2026-10-06-page-file-and-cache-design.md
+  - docs/specs/2026-10-06-page-file-and-cache-design.md
   - pr: 3
   - pr: 4
   - pr: 25

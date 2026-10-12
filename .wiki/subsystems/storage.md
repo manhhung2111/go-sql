@@ -4,7 +4,7 @@ kind: subsystem
 sources:
   - internal/storage/
   - internal/engine/rowcodec.go
-  - docs/superpowers/specs/2026-10-06-page-file-and-cache-design.md
+  - docs/specs/2026-10-06-page-file-and-cache-design.md
   - pr: 25
 updated: 7660bd0
 ---

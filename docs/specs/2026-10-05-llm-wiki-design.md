@@ -7,7 +7,7 @@ Status: draft, awaiting review
 
 Give AI agents persistent, repo-local knowledge of go-sql so they stop re-deriving the same facts each session. The pattern follows Karpathy's LLM Wiki: raw sources, an LLM-maintained markdown wiki, and a schema that says how to maintain it.
 
-- Raw sources: the code and its comments (primary), merged PRs and commit history (rationale), and `plan/` (supplementary, optional).
+- Raw sources: the code and its comments (primary), merged PRs and commit history (rationale), and `docs/plans/` (supplementary, optional).
 - Wiki: `.wiki/` at the repo root, committed to git.
 - Schema: `.wiki/SCHEMA.md`, holding page formats and the ingest rules.
 
@@ -18,7 +18,7 @@ Two skills maintain it: `/init-wiki` (one-off build) and `/sync-wiki` (increment
 | Question | Decision |
 | --- | --- |
 | What should the wiki capture? | Both a code map and rationale: `code/`, `subsystems/`, `decisions/`, `concepts/`. |
-| Primary source | Code and comments. `plan/` is gitignored and only a hint. No claim may depend on it alone. |
+| Primary source | Code and comments. `docs/plans/` records intent and is only a hint. No claim may depend on it alone. |
 | Location | `.wiki/` at the repo root, committed. |
 | How does sync find changes? | `git log --first-parent <marker>..main` (squash merges give one commit per PR), plus `gh pr view` for title, body and review comments. Falls back to git only if `gh` is unavailable. |
 | Output | Skills edit `.wiki/` in the working tree, print a summary and propose a Conventional Commit. They ask before committing and never push or open a PR. |
@@ -94,7 +94,7 @@ The marker is the SHA after `through` or after `..` in the newest entry. There i
 Location: `.claude/skills/init-wiki/SKILL.md`, in the same format as `create-pr`.
 
 1. **Preconditions.** Clean working tree, branch is `main` or cut from it. If `.wiki/` already has pages, stop and point to `/sync-wiki`, unless the user passes an explicit rebuild flag.
-2. **Survey.** Use tokensave and `CLAUDE.md` to list packages, files and entry points. Read code and comments. Read `git log` and `gh pr view` for the rationale. Read `plan/` if present, as a hint to be confirmed against code or a PR.
+2. **Survey.** Use tokensave and `CLAUDE.md` to list packages, files and entry points. Read code and comments. Read `git log` and `gh pr view` for the rationale. Read `docs/plans/` if present, as a hint to be confirmed against code or a PR.
 3. **Write `SCHEMA.md` first.** Page formats and ingest rules.
 4. **Write pages in dependency order:** `code/`, then `concepts/`, then `decisions/`, then `subsystems/`, then `index.md`. Every claim gets a `sources:` entry.
 5. **Verify.** Link check, every `sources:` path exists, every page is in `index.md`. Fix problems or list them in the report.

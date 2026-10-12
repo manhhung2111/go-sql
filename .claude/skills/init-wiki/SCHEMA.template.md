@@ -24,7 +24,7 @@ Kind folders are flat: no nested folders.
 
 1. The code and its comments (primary).
 2. Merged PRs and commit history (rationale): `git log`, `gh pr view`.
-3. `plan/` is gitignored scratch and exists only on one machine. It may point you at something, but a claim must be confirmed against code, a comment, a commit or a PR. Never cite `plan/`.
+3. `docs/plans/` holds implementation plans. A plan records intent, not what shipped. It may point you at something, but a claim must be confirmed against code, a comment, a commit or a PR. Never cite `docs/plans/`.
 
 Where the sources are silent, write "rationale not recorded". Never invent rationale.
 
