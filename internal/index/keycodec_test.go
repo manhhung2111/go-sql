@@ -90,7 +90,12 @@ func TestEncodeKey_Bool(t *testing.T) {
 }
 
 func TestEncodeKey_ReturnedKeyIsOwnedByCaller(t *testing.T) {
-	key := mustEncode(t, "abc")
-	key[0] = 'X'
+	// A key must survive later encodings, and editing it must not leak into them.
+	first := mustEncode(t, "abc")
+	second := mustEncode(t, "xyz")
+	assert.Equal(t, []byte("abc"), first)
+
+	first[0] = 'X'
 	assert.Equal(t, []byte("abc"), mustEncode(t, "abc"))
+	assert.Equal(t, []byte("xyz"), second)
 }
