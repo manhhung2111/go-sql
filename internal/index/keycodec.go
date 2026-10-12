@@ -19,6 +19,14 @@ func EncodeKey(v any) ([]byte, error) {
 		key := make([]byte, 8)
 		binary.BigEndian.PutUint64(key, uint64(x)^(1<<63))
 		return key, nil
+	case string:
+		// []byte(x) copies, so the key never aliases the string or a later key.
+		return []byte(x), nil
+	case bool:
+		if x {
+			return []byte{1}, nil
+		}
+		return []byte{0}, nil
 	case nil:
 		return nil, errors.New("cannot index a NULL value")
 	default:

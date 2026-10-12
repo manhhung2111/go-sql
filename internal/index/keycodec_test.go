@@ -64,3 +64,33 @@ func TestEncodeKey_Errors(t *testing.T) {
 		})
 	}
 }
+
+func TestEncodeKey_StringOrder(t *testing.T) {
+	// Strictly increasing under byte-wise comparison: the empty string first,
+	// uppercase before lowercase, a prefix before its extensions, and embedded
+	// zero bytes ordered by value.
+	ordered := []string{"", "B", "a", "a\x00", "a\x00b", "ab"}
+	for i := 0; i+1 < len(ordered); i++ {
+		a, b := mustEncode(t, ordered[i]), mustEncode(t, ordered[i+1])
+		assert.Less(t, bytes.Compare(a, b), 0, "%q must sort before %q", ordered[i], ordered[i+1])
+	}
+}
+
+func TestEncodeKey_StringBytesAreUnchanged(t *testing.T) {
+	for _, s := range []string{"", "abc", "a\x00b", "\xff\xfe", "héllo"} {
+		assert.Equal(t, []byte(s), mustEncode(t, s), "%q", s)
+	}
+}
+
+func TestEncodeKey_Bool(t *testing.T) {
+	f, tr := mustEncode(t, false), mustEncode(t, true)
+	assert.Equal(t, []byte{0}, f)
+	assert.Equal(t, []byte{1}, tr)
+	assert.Less(t, bytes.Compare(f, tr), 0)
+}
+
+func TestEncodeKey_ReturnedKeyIsOwnedByCaller(t *testing.T) {
+	key := mustEncode(t, "abc")
+	key[0] = 'X'
+	assert.Equal(t, []byte("abc"), mustEncode(t, "abc"))
+}
