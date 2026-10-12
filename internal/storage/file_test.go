@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -614,6 +615,27 @@ func TestSqlFile_Get(t *testing.T) {
 		assert.ErrorContains(t, err, "checksum mismatch")
 	})
 
+	t.Run("a damaged slot under a valid checksum is an error, not a stale address", func(t *testing.T) {
+		f, path := newTestFile(t)
+		id, err := f.Insert([]byte("abc"))
+		require.NoError(t, err)
+
+		// Stretch slot 0's length past the end of the page, then re-stamp the
+		// checksum so that only the layout check can notice.
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		binary.LittleEndian.PutUint16(raw[pageHeaderSize+2:], 500)
+		stampPage(raw[:maxPageSize], 0)
+		require.NoError(t, os.WriteFile(path, raw, 0644))
+
+		got, err := f.Get(id)
+
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrRowNotFound)
+		assert.ErrorContains(t, err, "outside row area")
+		assert.Nil(t, got)
+	})
+
 	t.Run("the returned bytes belong to the caller, even over a cached page file", func(t *testing.T) {
 		// A cached page file hands out one shared, immutable buffer per page,
 		// so a Get that returned a view into it would let the caller corrupt
@@ -641,7 +663,7 @@ func TestSqlFile_Get(t *testing.T) {
 // Get holds only the table's read lock, like Scan, so Gets and Scans of one
 // file can run at once. This is meaningful under -race.
 func TestSqlFile_GetsMayRunConcurrentlyWithScans(t *testing.T) {
-	f, _ := newTestFile(t)
+	f, path := newTestFile(t)
 	const n = 3000
 	ids := make([]RowID, n)
 	for i := 0; i < n; i++ {
@@ -649,6 +671,12 @@ func TestSqlFile_GetsMayRunConcurrentlyWithScans(t *testing.T) {
 		require.NoError(t, err)
 		ids[i] = id
 	}
+	// Reopen so the tail cache is empty: a Get that loaded it would then write
+	// shared state, which the race detector catches.
+	require.NoError(t, f.Close())
+	f, err := OpenFile(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = f.Close() })
 
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {
