@@ -515,3 +515,16 @@ func TestTree_MatchesTheModel(t *testing.T) {
 		})
 	}
 }
+
+func TestMaxKeyLenFor(t *testing.T) {
+	assert.Equal(t, 4084, MaxKeyLenFor(DefaultNodeBytes))
+	assert.Equal(t, 12, MaxKeyLenFor(testNodeBytes))
+	assert.Equal(t, 1, MaxKeyLenFor(52))
+	assert.Equal(t, 0, MaxKeyLenFor(51))
+
+	for _, nodeBytes := range []int{52, 96, 1000, DefaultNodeBytes} {
+		tree, err := New(nodeBytes)
+		require.NoError(t, err)
+		assert.Equal(t, tree.MaxKeyLen(), MaxKeyLenFor(nodeBytes), "nodeBytes %d", nodeBytes)
+	}
+}
