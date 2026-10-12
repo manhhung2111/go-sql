@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"manhhung2111/go-sql/internal/index"
 	"manhhung2111/go-sql/internal/parser"
 	"manhhung2111/go-sql/internal/storage"
 	"os"
@@ -264,11 +265,13 @@ func (t *SqlTable) buildRow(row []parser.Token, targetColumns []string, targetIn
 }
 
 // checkUniqueness reports the first PRIMARY KEY/UNIQUE violation among
-// newRows, checked in row order against the rows already in the table's file
-// and against the earlier rows of the batch. Only the key values newRows
-// insert can conflict with an existing row, so those are collected first and
-// the file is streamed once against them: memory is proportional to the
-// statement, not the table. NULLs never conflict.
+// newRows, checked in row order against the rows already in the table and
+// against the earlier rows of the batch, and rejects a string too long to be
+// indexed at the point where a duplicate would be reported. A column with an
+// index is checked by looking each value up; a column without one (indexes
+// are off, or it could not be indexed) streams the file once against the
+// statement's own key values, so memory is proportional to the statement.
+// NULLs never conflict.
 func (t *SqlTable) checkUniqueness(newRows [][]any, uniqueColumns []int) error {
 	candidates := make(map[int]map[any]bool, len(uniqueColumns))
 	anyCandidate := false
@@ -286,9 +289,26 @@ func (t *SqlTable) checkUniqueness(newRows [][]any, uniqueColumns []int) error {
 		return nil
 	}
 
-	taken, err := t.existingKeys(candidates)
+	trees, err := t.indexes()
 	if err != nil {
 		return err
+	}
+	scanned := make(map[int]map[any]bool)
+	for _, idx := range uniqueColumns {
+		if trees[idx] == nil {
+			scanned[idx] = candidates[idx]
+		}
+	}
+	seen := make(map[int]map[any]bool, len(uniqueColumns))
+	if len(scanned) > 0 {
+		if seen, err = t.existingKeys(scanned); err != nil {
+			return err
+		}
+	}
+	for _, idx := range uniqueColumns {
+		if seen[idx] == nil {
+			seen[idx] = make(map[any]bool)
+		}
 	}
 
 	for _, row := range newRows {
@@ -297,10 +317,21 @@ func (t *SqlTable) checkUniqueness(newRows [][]any, uniqueColumns []int) error {
 			if value == nil {
 				continue // multiple NULLs are allowed in a UNIQUE column
 			}
-			if taken[idx][value] {
+			if err := checkKeyLength(t.Columns[idx].Name, value); err != nil {
+				return err
+			}
+			duplicate := seen[idx][value]
+			if tree := trees[idx]; tree != nil && !duplicate {
+				key, err := index.EncodeKey(value)
+				if err != nil {
+					return err
+				}
+				_, duplicate = tree.Get(key)
+			}
+			if duplicate {
 				return fmt.Errorf("duplicate entry %v for column %q", value, t.Columns[idx].Name)
 			}
-			taken[idx][value] = true
+			seen[idx][value] = true
 		}
 	}
 	return nil
@@ -604,6 +635,12 @@ func (t *SqlTable) addColumn(column parser.ColumnDefinition) error {
 		return fmt.Errorf("field %q doesn't have a default value", column.Name)
 	}
 
+	if column.IsPrimaryKey() || column.IsUnique() {
+		if err := checkKeyLength(column.Name, filler); err != nil {
+			return err
+		}
+	}
+
 	// One value backfilled onto two or more rows would hold the same key twice.
 	if (column.IsPrimaryKey() || column.IsUnique()) && filler != nil {
 		rows, err := t.countRows(2)
@@ -778,16 +815,16 @@ type resolvedAssignment struct {
 // matches every row, same as Delete), enforcing PRIMARY KEY/UNIQUE on any
 // assigned column. NOT NULL is a non-issue here: the parser only accepts a
 // STRING or NUMBER literal on the right of SET, so an assignment can never
-// produce NULL. The table's file is scanned once: it finds the matching rows
-// and, for the uniqueness checks, whether any row that is not being updated
-// already holds an assigned value. Every new version is encoded and
-// size-checked before anything is written, and the new versions are inserted
-// before the old ones are tombstoned, so a failure partway through (a
+// produce NULL. The table's file is scanned once to find the matching rows. A
+// unique column is in conflict when a row that is not being updated already
+// holds the assigned value: an indexed column looks the value up, and a column
+// without an index notices it during the scan. Every new version is encoded
+// and size-checked before anything is written, and the new versions are
+// inserted before the old ones are tombstoned, so a failure partway through (a
 // coercion error, a uniqueness violation, a row too large for a page) leaves
 // the table untouched, and a crash between the two writes can duplicate a row
-// but never lose one.
-// An I/O error during the writes discards the indexes; otherwise every updated
-// row is re-pointed at its new RowID.
+// but never lose one. An I/O error during the writes discards the indexes;
+// otherwise every updated row is re-pointed at its new RowID.
 func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expression) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -822,10 +859,20 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 		assigned[a.index] = a.value
 		col := t.Columns[a.index]
 		if col.IsPrimaryKey() || col.IsUnique() {
+			if err := checkKeyLength(col.Name, a.value); err != nil {
+				return err
+			}
 			uniqueColumns = append(uniqueColumns, a.index)
 		}
 	}
 
+	var trees map[int]*index.Tree
+	if len(uniqueColumns) > 0 {
+		var err error
+		if trees, err = t.indexes(); err != nil {
+			return err
+		}
+	}
 	// If the indexes are built, remember each matched row's old key values so
 	// they can be removed after the write.
 	trackKeys := t.builtIndexes() != nil
@@ -852,7 +899,7 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 			// excluded, so re-assigning a column back to its current value
 			// never self-conflicts.
 			for _, idx := range uniqueColumns {
-				if row[idx] != nil && row[idx] == assigned[idx] {
+				if trees[idx] == nil && row[idx] != nil && row[idx] == assigned[idx] {
 					conflicts[idx] = true
 				}
 			}
@@ -870,6 +917,15 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 
 	if len(updated) > 0 {
 		for _, idx := range uniqueColumns {
+			if tree := trees[idx]; tree != nil && assigned[idx] != nil {
+				key, err := index.EncodeKey(assigned[idx])
+				if err != nil {
+					return err
+				}
+				if holder, found := tree.Get(key); found && !slices.Contains(oldIDs, holder) {
+					conflicts[idx] = true
+				}
+			}
 			if conflicts[idx] {
 				return fmt.Errorf("duplicate entry %v for column %q", assigned[idx], t.Columns[idx].Name)
 			}
