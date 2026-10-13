@@ -68,7 +68,7 @@ func TestPlanLookup(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, table.planLookup(tc.where, columnIndex))
+			assert.Equal(t, tc.want, table.planLookup(tc.where, columnIndex).equalities)
 		})
 	}
 }
@@ -79,9 +79,9 @@ func TestPlanLookup_BooleanColumnsOnlyTakeEqualityOperators(t *testing.T) {
 	byID := eqCmp("id", numTok("1"))
 	want := []lookupPlan{{0, int64(1)}}
 
-	assert.Equal(t, want, table.planLookup(andExpr(byID, eqCmp("flag", numTok("1"))), columnIndex), "= on a boolean is fine")
-	assert.Equal(t, want, table.planLookup(andExpr(byID, cmp(identTok("flag"), parser.NEQ, numTok("1"))), columnIndex), "so is !=")
-	assert.Nil(t, table.planLookup(andExpr(byID, cmp(identTok("flag"), parser.GT, numTok("0"))), columnIndex),
+	assert.Equal(t, want, table.planLookup(andExpr(byID, eqCmp("flag", numTok("1"))), columnIndex).equalities, "= on a boolean is fine")
+	assert.Equal(t, want, table.planLookup(andExpr(byID, cmp(identTok("flag"), parser.NEQ, numTok("1"))), columnIndex).equalities, "so is !=")
+	assert.Nil(t, table.planLookup(andExpr(byID, cmp(identTok("flag"), parser.GT, numTok("0"))), columnIndex).equalities,
 		"an ordering operator on a boolean fails for every row that has a value")
 }
 
