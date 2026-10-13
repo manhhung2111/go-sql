@@ -26,7 +26,7 @@ func randName(rng *rand.Rand) string  { return fmt.Sprintf("n%d", rng.Intn(4)) }
 // coerced. The expression is built once so both tables see the same one.
 func randomWhere(rng *rand.Rand) parser.Expression {
 	id := func() parser.Token { return numTok(fmt.Sprint(rng.Intn(25))) }
-	switch rng.Intn(14) {
+	switch rng.Intn(20) {
 	case 0:
 		return nil
 	case 1:
@@ -53,6 +53,18 @@ func randomWhere(rng *rand.Rand) parser.Expression {
 		return binaryExpr(cmp(id(), parser.EQ, identTok("id")), parser.AND, cmp(strTok(randName(rng)), parser.EQ, identTok("name")))
 	case 12:
 		return binaryExpr(cmp(identTok("id"), parser.EQ, id()), parser.AND, cmp(identTok("nosuch"), parser.EQ, numTok("1")))
+	case 13:
+		return cmp(identTok("id"), parser.GT, id())
+	case 14:
+		return cmp(identTok("id"), parser.LTE, id())
+	case 15:
+		return binaryExpr(cmp(identTok("id"), parser.GTE, id()), parser.AND, cmp(identTok("id"), parser.LT, id()))
+	case 16:
+		return cmp(identTok("email"), parser.GT, strTok(randEmail(rng)))
+	case 17:
+		return binaryExpr(cmp(identTok("id"), parser.GTE, id()), parser.AND, cmp(identTok("name"), parser.EQ, strTok(randName(rng))))
+	case 18:
+		return cmp(id(), parser.LT, identTok("id"))
 	default:
 		return cmp(identTok("id"), parser.EQ, strTok("oops"))
 	}
@@ -100,29 +112,46 @@ func randomStatement(rng *rand.Rand) func(*SqlTable) (Response, error) {
 	}
 }
 
+// compareWithUnindexed runs a long seeded mix of statements on a table with
+// indexes and on one without, and requires identical results, errors and files
+// after every statement.
+func compareWithUnindexed(t *testing.T, seed int64) {
+	t.Helper()
+	rng := rand.New(rand.NewSource(seed))
+	indexed, plain := keyedTable(t), keyedTable(t)
+	plain.noIndexes = true
+
+	for op := 0; op < 400; op++ {
+		statement := randomStatement(rng)
+
+		gotResp, gotErr := statement(indexed)
+		wantResp, wantErr := statement(plain)
+
+		require.Equal(t, errText(wantErr), errText(gotErr), "op %d", op)
+		require.Equal(t, wantResp, gotResp, "op %d", op)
+		require.Equal(t, fileRows(t, plain), fileRows(t, indexed), "op %d", op)
+		if indexed.builtIndexes() != nil {
+			assertIndexesMatchHeap(t, indexed)
+		}
+	}
+	assert.NotNil(t, indexed.builtIndexes(), "the run must have used the indexes")
+}
+
 // With and without indexes, the same statements must give the same results,
 // the same errors and the same file, whatever the mix.
 func TestIndexedTableMatchesAnUnindexedOne(t *testing.T) {
 	for seed := int64(1); seed <= 3; seed++ {
-		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
-			rng := rand.New(rand.NewSource(seed))
-			indexed, plain := keyedTable(t), keyedTable(t)
-			plain.noIndexes = true
+		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) { compareWithUnindexed(t, seed) })
+	}
+}
 
-			for op := 0; op < 400; op++ {
-				statement := randomStatement(rng)
-
-				gotResp, gotErr := statement(indexed)
-				wantResp, wantErr := statement(plain)
-
-				require.Equal(t, errText(wantErr), errText(gotErr), "op %d", op)
-				require.Equal(t, wantResp, gotResp, "op %d", op)
-				require.Equal(t, fileRows(t, plain), fileRows(t, indexed), "op %d", op)
-				if indexed.builtIndexes() != nil {
-					assertIndexesMatchHeap(t, indexed)
-				}
-			}
-			assert.NotNil(t, indexed.builtIndexes(), "the run must have used the indexes")
-		})
+// With the cap lowered to two rows most ranges are too big and scan: the
+// answers must not change.
+func TestIndexedTableMatchesWhenRangesExceedTheCap(t *testing.T) {
+	saved := maxRangeRows
+	maxRangeRows = 2
+	t.Cleanup(func() { maxRangeRows = saved })
+	for seed := int64(7); seed <= 8; seed++ {
+		compareWithUnindexed(t, seed)
 	}
 }

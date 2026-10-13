@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"bytes"
 	"errors"
+	"slices"
 
 	"manhhung2111/go-sql/internal/index"
 	"manhhung2111/go-sql/internal/parser"
@@ -15,31 +17,98 @@ type lookupPlan struct {
 	value  any
 }
 
-// planLookup returns the keys that where pins with an equality, in the order
-// they appear, if where can be served from an index at all. That is only so
-// when evaluating where cannot fail on any row: the scan evaluates it on every
-// row, so an error in any part of it surfaces as soon as the table has one row,
-// and a lookup that skipped the other rows would hide it. Such a where is an
-// AND chain of comparisons that each have one column and one literal, where the
-// column exists, the literal coerces to a value of the column's type (NULL does not),
+// rangePlan is a half-open range of encoded keys on one key column, as
+// Tree.Range takes it. A nil lo or hi is unbounded.
+type rangePlan struct {
+	column int
+	lo, hi []byte
+}
+
+// lookupPlans is what a WHERE offers an index: the keys it pins with an
+// equality and the ranges it bounds with an ordering operator.
+type lookupPlans struct {
+	equalities []lookupPlan
+	ranges     []rangePlan
+}
+
+// planLookup returns what where offers an index, if it can be served from an
+// index at all. That is only so when evaluating where cannot fail on any row:
+// the scan evaluates it on every row, so an error in any part of it surfaces as
+// soon as the table has one row, and a lookup that skipped the other rows would
+// hide it. Such a where is an AND chain of comparisons that each have one column
+// and one literal, where the column exists, the operator is one the scan
+// supports, the literal coerces to a value of the column's type (NULL does not),
 // and a boolean column is compared with = or != only. Anything else (OR, two
 // columns, an unknown column, a literal that does not coerce, NULL) scans.
-func (t *SqlTable) planLookup(where parser.Expression, columnIndex map[string]int) []lookupPlan {
+//
+// An = on a key column is an equality. A <, <=, > or >= on a key column bounds
+// that column's range; bounds on one column combine into the tightest range. A
+// != or a condition on another column constrains nothing but is still checked.
+func (t *SqlTable) planLookup(where parser.Expression, columnIndex map[string]int) lookupPlans {
 	var conjuncts []*parser.ComparisonExpression
 	if !collectConjuncts(where, &conjuncts) {
-		return nil
+		return lookupPlans{}
 	}
-	var plans []lookupPlan
+	var plans lookupPlans
 	for _, c := range conjuncts {
-		column, value, ok := t.columnAgainstLiteral(c, columnIndex)
+		column, op, value, ok := t.columnAgainstLiteral(c, columnIndex)
 		if !ok {
-			return nil
+			return lookupPlans{}
 		}
-		if c.Operator == parser.EQ && t.isKeyColumn(column) {
-			plans = append(plans, lookupPlan{column: column, value: value})
+		if !t.isKeyColumn(column) {
+			continue
+		}
+		switch op {
+		case parser.EQ:
+			plans.equalities = append(plans.equalities, lookupPlan{column: column, value: value})
+		case parser.GT, parser.GTE, parser.LT, parser.LTE:
+			key, err := index.EncodeKey(value)
+			if err != nil {
+				return lookupPlans{}
+			}
+			plans.addBound(column, op, key)
 		}
 	}
 	return plans
+}
+
+// addBound tightens the range on column with "column op key". The key that
+// comes right after key in byte order is key followed by a zero byte, for the
+// fixed-width integer encodings and for strings alike, so > and <= use that.
+func (p *lookupPlans) addBound(column int, op parser.TokenType, key []byte) {
+	i := slices.IndexFunc(p.ranges, func(r rangePlan) bool { return r.column == column })
+	if i < 0 {
+		p.ranges = append(p.ranges, rangePlan{column: column})
+		i = len(p.ranges) - 1
+	}
+	r := &p.ranges[i]
+	after := append(slices.Clone(key), 0)
+	switch op {
+	case parser.GTE:
+		r.lo = tighterLower(r.lo, key)
+	case parser.GT:
+		r.lo = tighterLower(r.lo, after)
+	case parser.LT:
+		r.hi = tighterUpper(r.hi, key)
+	case parser.LTE:
+		r.hi = tighterUpper(r.hi, after)
+	}
+}
+
+// tighterLower returns the greater of two lower bounds; nil is unbounded.
+func tighterLower(current, bound []byte) []byte {
+	if current == nil || bytes.Compare(bound, current) > 0 {
+		return bound
+	}
+	return current
+}
+
+// tighterUpper returns the smaller of two upper bounds; nil is unbounded.
+func tighterUpper(current, bound []byte) []byte {
+	if current == nil || bytes.Compare(bound, current) < 0 {
+		return bound
+	}
+	return current
 }
 
 // collectConjuncts flattens an AND chain into its comparisons. It reports
@@ -57,36 +126,48 @@ func collectConjuncts(expr parser.Expression, out *[]*parser.ComparisonExpressio
 }
 
 // columnAgainstLiteral resolves a comparison of one column with one literal,
-// in either order, to the column and the literal coerced to its type.
-func (t *SqlTable) columnAgainstLiteral(c *parser.ComparisonExpression, columnIndex map[string]int) (column int, value any, ok bool) {
+// in either order, to the column, the operator as if the column were on the
+// left (so 5 < id is id > 5), and the literal coerced to the column's type.
+func (t *SqlTable) columnAgainstLiteral(c *parser.ComparisonExpression, columnIndex map[string]int) (column int, op parser.TokenType, value any, ok bool) {
 	var name string
 	var literal parser.Token
+	op = c.Operator
 	switch leftIsColumn, rightIsColumn := c.Left.Type == parser.IDENT, c.Right.Type == parser.IDENT; {
 	case leftIsColumn && !rightIsColumn:
 		name, literal = c.Left.Value, c.Right
 	case rightIsColumn && !leftIsColumn:
 		name, literal = c.Right.Value, c.Left
+		switch op {
+		case parser.LT:
+			op = parser.GT
+		case parser.LTE:
+			op = parser.GTE
+		case parser.GT:
+			op = parser.LT
+		case parser.GTE:
+			op = parser.LTE
+		}
 	default:
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
 	column, known := columnIndex[name]
 	if !known {
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
-	switch c.Operator {
+	switch op {
 	case parser.EQ, parser.NEQ, parser.LT, parser.LTE, parser.GT, parser.GTE:
 	default:
-		return 0, nil, false // the scan reports "unsupported comparison operator"
+		return 0, 0, nil, false // the scan reports "unsupported comparison operator"
 	}
-	if _, isBool := t.Columns[column].DataType.(parser.BooleanDataType); isBool && c.Operator != parser.EQ && c.Operator != parser.NEQ {
-		return 0, nil, false
+	if _, isBool := t.Columns[column].DataType.(parser.BooleanDataType); isBool && op != parser.EQ && op != parser.NEQ {
+		return 0, 0, nil, false
 	}
 	// A NULL literal does not coerce, so it never reaches a lookup.
 	value, err := coerceValue(t.Columns[column].DataType, literal)
 	if err != nil {
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
-	return column, value, true
+	return column, op, value, true
 }
 
 func (t *SqlTable) isKeyColumn(column int) bool {
@@ -100,14 +181,21 @@ type fetchedRow struct {
 	row []any
 }
 
+// maxRangeRows is the most rows a range lookup fetches. Each fetch reads a
+// page, while a scan reads each page once, so a range that holds more rows than
+// this is left to the scan. It is a variable so a test can lower it.
+var maxRangeRows = 100
+
 // lookupRows serves where from an index when it can. usable is false when the
-// statement must scan instead; otherwise rows holds the one row that satisfies
-// where, or none. needTrees are columns that must have a tree for a lookup to
-// be enough (an UPDATE's assigned unique columns). It may build the indexes,
-// or discard them if one disagrees with the file. Callers hold t.mu.
+// statement must scan instead; otherwise rows holds the rows that satisfy
+// where, in file order (the scan's order). A key pinned with = yields at most
+// one row; a bounded range yields at most maxRangeRows. needTrees are columns
+// that must have a tree for a lookup to be enough (an UPDATE's assigned unique
+// columns). It may build the indexes, or discard them if one disagrees with the
+// file. Callers hold t.mu.
 func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]int, needTrees []int) (rows []fetchedRow, usable bool, err error) {
 	plans := t.planLookup(where, columnIndex)
-	if len(plans) == 0 {
+	if len(plans.equalities) == 0 && len(plans.ranges) == 0 {
 		return nil, false, nil
 	}
 	trees, err := t.indexes()
@@ -119,7 +207,7 @@ func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]in
 			return nil, false, nil
 		}
 	}
-	for _, plan := range plans {
+	for _, plan := range plans.equalities {
 		tree := trees[plan.column]
 		if tree == nil {
 			continue
@@ -132,28 +220,85 @@ func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]in
 		if !found {
 			return nil, true, nil
 		}
-		b, err := t.file.Get(id)
-		if errors.Is(err, storage.ErrRowNotFound) {
+		row, matched, stale, err := t.fetchMatching(id, where, columnIndex)
+		if err != nil {
+			return nil, false, err
+		}
+		if stale {
 			// The index points at a row that is not there: it is wrong, so
 			// drop it and let the caller scan.
 			t.dropIndexes()
 			return nil, false, nil
-		}
-		if err != nil {
-			return nil, false, err
-		}
-		row, err := DecodeRow(t.Columns, b)
-		if err != nil {
-			return nil, false, err
-		}
-		matched, err := evalWhere(where, row, columnIndex, t.Columns)
-		if err != nil {
-			return nil, false, err
 		}
 		if !matched {
 			return nil, true, nil
 		}
 		return []fetchedRow{{id: id, row: row}}, true, nil
 	}
+	for _, plan := range plans.ranges {
+		if tree := trees[plan.column]; tree != nil {
+			return t.rangeRows(tree, plan, where, columnIndex)
+		}
+	}
 	return nil, false, nil
+}
+
+// rangeRows fetches the rows whose key lies in plan's range and that satisfy
+// where, in file order. It reports not usable if the range holds more than
+// maxRangeRows rows or an entry is stale.
+func (t *SqlTable) rangeRows(tree *index.Tree, plan rangePlan, where parser.Expression, columnIndex map[string]int) ([]fetchedRow, bool, error) {
+	var ids []storage.RowID
+	for _, id := range tree.Range(plan.lo, plan.hi) {
+		if len(ids) == maxRangeRows {
+			return nil, false, nil
+		}
+		ids = append(ids, id)
+	}
+	// The scan returns rows by page and slot; so must we, or results and the
+	// order of an UPDATE's new versions would depend on the access path.
+	slices.SortFunc(ids, func(a, b storage.RowID) int {
+		if a.Page != b.Page {
+			if a.Page < b.Page {
+				return -1
+			}
+			return 1
+		}
+		return a.Slot - b.Slot
+	})
+
+	var rows []fetchedRow
+	for _, id := range ids {
+		row, matched, stale, err := t.fetchMatching(id, where, columnIndex)
+		if err != nil {
+			return nil, false, err
+		}
+		if stale {
+			t.dropIndexes()
+			return nil, false, nil
+		}
+		if matched {
+			rows = append(rows, fetchedRow{id: id, row: row})
+		}
+	}
+	return rows, true, nil
+}
+
+// fetchMatching reads the row at id and reports whether it satisfies where.
+// stale is true when the file has no row there, which means the index is wrong.
+func (t *SqlTable) fetchMatching(id storage.RowID, where parser.Expression, columnIndex map[string]int) (row []any, matched, stale bool, err error) {
+	b, err := t.file.Get(id)
+	if errors.Is(err, storage.ErrRowNotFound) {
+		return nil, false, true, nil
+	}
+	if err != nil {
+		return nil, false, false, err
+	}
+	if row, err = DecodeRow(t.Columns, b); err != nil {
+		return nil, false, false, err
+	}
+	matched, err = evalWhere(where, row, columnIndex, t.Columns)
+	if err != nil {
+		return nil, false, false, err
+	}
+	return row, matched, false, nil
 }
