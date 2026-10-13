@@ -181,14 +181,21 @@ type fetchedRow struct {
 	row []any
 }
 
+// maxRangeRows is the most rows a range lookup fetches. Each fetch reads a
+// page, while a scan reads each page once, so a range that holds more rows than
+// this is left to the scan. It is a variable so a test can lower it.
+var maxRangeRows = 100
+
 // lookupRows serves where from an index when it can. usable is false when the
-// statement must scan instead; otherwise rows holds the one row that satisfies
-// where, or none. needTrees are columns that must have a tree for a lookup to
-// be enough (an UPDATE's assigned unique columns). It may build the indexes,
-// or discard them if one disagrees with the file. Callers hold t.mu.
+// statement must scan instead; otherwise rows holds the rows that satisfy
+// where, in file order (the scan's order). A key pinned with = yields at most
+// one row; a bounded range yields at most maxRangeRows. needTrees are columns
+// that must have a tree for a lookup to be enough (an UPDATE's assigned unique
+// columns). It may build the indexes, or discard them if one disagrees with the
+// file. Callers hold t.mu.
 func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]int, needTrees []int) (rows []fetchedRow, usable bool, err error) {
-	plans := t.planLookup(where, columnIndex).equalities
-	if len(plans) == 0 {
+	plans := t.planLookup(where, columnIndex)
+	if len(plans.equalities) == 0 && len(plans.ranges) == 0 {
 		return nil, false, nil
 	}
 	trees, err := t.indexes()
@@ -200,7 +207,7 @@ func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]in
 			return nil, false, nil
 		}
 	}
-	for _, plan := range plans {
+	for _, plan := range plans.equalities {
 		tree := trees[plan.column]
 		if tree == nil {
 			continue
@@ -213,28 +220,85 @@ func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]in
 		if !found {
 			return nil, true, nil
 		}
-		b, err := t.file.Get(id)
-		if errors.Is(err, storage.ErrRowNotFound) {
+		row, matched, stale, err := t.fetchMatching(id, where, columnIndex)
+		if err != nil {
+			return nil, false, err
+		}
+		if stale {
 			// The index points at a row that is not there: it is wrong, so
 			// drop it and let the caller scan.
 			t.dropIndexes()
 			return nil, false, nil
-		}
-		if err != nil {
-			return nil, false, err
-		}
-		row, err := DecodeRow(t.Columns, b)
-		if err != nil {
-			return nil, false, err
-		}
-		matched, err := evalWhere(where, row, columnIndex, t.Columns)
-		if err != nil {
-			return nil, false, err
 		}
 		if !matched {
 			return nil, true, nil
 		}
 		return []fetchedRow{{id: id, row: row}}, true, nil
 	}
+	for _, plan := range plans.ranges {
+		if tree := trees[plan.column]; tree != nil {
+			return t.rangeRows(tree, plan, where, columnIndex)
+		}
+	}
 	return nil, false, nil
+}
+
+// rangeRows fetches the rows whose key lies in plan's range and that satisfy
+// where, in file order. It reports not usable if the range holds more than
+// maxRangeRows rows or an entry is stale.
+func (t *SqlTable) rangeRows(tree *index.Tree, plan rangePlan, where parser.Expression, columnIndex map[string]int) ([]fetchedRow, bool, error) {
+	var ids []storage.RowID
+	for _, id := range tree.Range(plan.lo, plan.hi) {
+		if len(ids) == maxRangeRows {
+			return nil, false, nil
+		}
+		ids = append(ids, id)
+	}
+	// The scan returns rows by page and slot; so must we, or results and the
+	// order of an UPDATE's new versions would depend on the access path.
+	slices.SortFunc(ids, func(a, b storage.RowID) int {
+		if a.Page != b.Page {
+			if a.Page < b.Page {
+				return -1
+			}
+			return 1
+		}
+		return a.Slot - b.Slot
+	})
+
+	var rows []fetchedRow
+	for _, id := range ids {
+		row, matched, stale, err := t.fetchMatching(id, where, columnIndex)
+		if err != nil {
+			return nil, false, err
+		}
+		if stale {
+			t.dropIndexes()
+			return nil, false, nil
+		}
+		if matched {
+			rows = append(rows, fetchedRow{id: id, row: row})
+		}
+	}
+	return rows, true, nil
+}
+
+// fetchMatching reads the row at id and reports whether it satisfies where.
+// stale is true when the file has no row there, which means the index is wrong.
+func (t *SqlTable) fetchMatching(id storage.RowID, where parser.Expression, columnIndex map[string]int) (row []any, matched, stale bool, err error) {
+	b, err := t.file.Get(id)
+	if errors.Is(err, storage.ErrRowNotFound) {
+		return nil, false, true, nil
+	}
+	if err != nil {
+		return nil, false, false, err
+	}
+	if row, err = DecodeRow(t.Columns, b); err != nil {
+		return nil, false, false, err
+	}
+	matched, err = evalWhere(where, row, columnIndex, t.Columns)
+	if err != nil {
+		return nil, false, false, err
+	}
+	return row, matched, false, nil
 }

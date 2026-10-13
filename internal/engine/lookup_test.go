@@ -126,7 +126,7 @@ func TestLookup_WhatItCannotServeStillScans(t *testing.T) {
 		where parser.Expression
 	}{
 		{"no where", nil},
-		{"a range", cmp(identTok("id"), parser.GTE, numTok("3"))},
+		{"a range on a column that is not a key", cmp(identTok("name"), parser.GTE, strTok("n3"))},
 		{"a column that is not a key", eqCmp("name", strTok("n3"))},
 		{"OR", orExpr(eqCmp("id", numTok("1")), eqCmp("id", numTok("2")))},
 		{"not equal", cmp(identTok("id"), parser.NEQ, numTok("3"))},
