@@ -16,6 +16,7 @@ Read this first. Conventions are in [SCHEMA.md](SCHEMA.md); the ingest history a
 - [internal/parser](code/parser.md): lexer, recursive-descent parser, AST
 - [internal/engine](code/engine.md): execution engine, catalog, codecs
 - [internal/engine/table.go](code/engine-table.md): the table implementation (largest file)
+- [internal/index](code/index.md): order-preserving key codec and in-memory B+ tree
 - [internal/storage](code/storage.md): heap files and pages
 - [internal/grpcserver](code/grpcserver.md): the ParseQuery RPC
 - [internal/wiring](code/wiring.md): Wire injector and providers
