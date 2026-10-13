@@ -436,11 +436,13 @@ func TestTableIndexes_AMissingEntryDiscardsThem(t *testing.T) {
 		name string
 		run  func(table *SqlTable) error
 	}{
+		// These WHEREs scan. A key lookup would not notice the missing entry:
+		// it would find nothing and stop.
 		{"delete", func(table *SqlTable) error {
-			return table.Delete(cmp(identTok("id"), parser.EQ, numTok("3")))
+			return table.Delete(cmp(identTok("id"), parser.GTE, numTok("3")))
 		}},
 		{"update", func(table *SqlTable) error {
-			return table.Update([]parser.Assignment{{Column: "name", Value: strTok("x")}}, cmp(identTok("id"), parser.EQ, numTok("3")))
+			return table.Update([]parser.Assignment{{Column: "name", Value: strTok("x")}}, cmp(identTok("name"), parser.EQ, strTok("n3")))
 		}},
 	}
 	for _, tc := range tests {

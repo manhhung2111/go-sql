@@ -536,7 +536,8 @@ func discardFile(tf tableFile) {
 // each matching row down to columns ("*" expands to every column in schema
 // order). Only the matching, projected rows are held in memory. Rows come
 // back in the file's order: insertion order, except that an updated row has
-// moved to the end.
+// moved to the end. A where that pins a PRIMARY KEY/UNIQUE column to a literal
+// and cannot fail on any row reads just that row through the index instead.
 func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -568,6 +569,27 @@ func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, 
 	}
 
 	rows := make([][]string, 0)
+	project := func(row []any) {
+		projected := make([]string, len(outputIndices))
+		for i, idx := range outputIndices {
+			projected[i] = stringifyValue(row[idx])
+		}
+		rows = append(rows, projected)
+	}
+
+	// A WHERE that pins a PRIMARY KEY/UNIQUE column to a literal is served
+	// from the index; see lookupRows.
+	fetched, usable, err := t.lookupRows(where, columnIndex, nil)
+	if err != nil {
+		return Response{}, err
+	}
+	if usable {
+		for _, f := range fetched {
+			project(f.row)
+		}
+		return Response{Columns: outputColumns, Rows: rows}, nil
+	}
+
 	for fileRow, err := range t.file.Scan() {
 		if err != nil {
 			return Response{}, err
@@ -583,12 +605,7 @@ func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, 
 		if !matched {
 			continue
 		}
-
-		projected := make([]string, len(outputIndices))
-		for i, idx := range outputIndices {
-			projected[i] = stringifyValue(row[idx])
-		}
-		rows = append(rows, projected)
+		project(row)
 	}
 
 	return Response{Columns: outputColumns, Rows: rows}, nil
@@ -752,7 +769,8 @@ func (t *SqlTable) Delete(where parser.Expression) error {
 }
 
 // deleteFromFile tombstones every live row of the table's file that matches
-// where, then fsyncs once, then removes the rows from the table's indexes.
+// where, then fsyncs once, then removes the rows from the table's indexes. A
+// where that pins a key is served from the index instead of a scan.
 // The matching rows are collected before the first tombstone is written, so
 // an evaluation error touches nothing, and a row is never tombstoned while
 // the scan is still reading its page; only an I/O error can leave the delete
@@ -763,28 +781,44 @@ func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[strin
 		return fmt.Errorf("table %q is closed", t.Name)
 	}
 
+	// A where that pins a key is served from the index. That can build the
+	// indexes, so whether there is an index to update is decided afterwards.
+	fetched, usable, err := t.lookupRows(where, columnIndex, nil)
+	if err != nil {
+		return err
+	}
+
 	// Only the key values of the matching rows are kept, and only if there is
 	// an index to update.
 	trackKeys := t.builtIndexes() != nil
 	keyCols := t.keyColumns()
 	var matched []storage.RowID
 	var keys [][]any
-	for row, err := range t.file.Scan() {
-		if err != nil {
-			return err
-		}
-		decoded, err := DecodeRow(t.Columns, row.Bytes)
-		if err != nil {
-			return err
-		}
-		isMatch, err := evalWhere(where, decoded, columnIndex, t.Columns)
-		if err != nil {
-			return err
-		}
-		if isMatch {
-			matched = append(matched, row.ID)
+	if usable {
+		for _, f := range fetched {
+			matched = append(matched, f.id)
 			if trackKeys {
-				keys = append(keys, keyValuesAt(decoded, keyCols))
+				keys = append(keys, keyValuesAt(f.row, keyCols))
+			}
+		}
+	} else {
+		for row, err := range t.file.Scan() {
+			if err != nil {
+				return err
+			}
+			decoded, err := DecodeRow(t.Columns, row.Bytes)
+			if err != nil {
+				return err
+			}
+			isMatch, err := evalWhere(where, decoded, columnIndex, t.Columns)
+			if err != nil {
+				return err
+			}
+			if isMatch {
+				matched = append(matched, row.ID)
+				if trackKeys {
+					keys = append(keys, keyValuesAt(decoded, keyCols))
+				}
 			}
 		}
 	}
@@ -816,7 +850,8 @@ type resolvedAssignment struct {
 // matches every row, same as Delete), enforcing PRIMARY KEY/UNIQUE on any
 // assigned column. NOT NULL is a non-issue here: the parser only accepts a
 // STRING or NUMBER literal on the right of SET, so an assignment can never
-// produce NULL. The table's file is scanned once to find the matching rows. A
+// produce NULL. The matching rows are found by one scan of the table's file, or
+// by one index lookup when where pins a key and cannot fail. A
 // unique column is in conflict when a row that is not being updated already
 // holds the assigned value: an indexed column looks the value up, and a column
 // without an index notices it during the scan. Every new version is encoded
@@ -864,9 +899,16 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 		}
 	}
 
+	// A where that pins a key is served from the index, but only if every
+	// unique column being assigned has a tree: the conflict check for a column
+	// without one needs the scan of the other rows. That can build the
+	// indexes, so whether there is an index to update is decided afterwards.
+	fetched, usable, err := t.lookupRows(where, columnIndex, uniqueColumns)
+	if err != nil {
+		return err
+	}
 	var trees map[int]*index.Tree
 	if len(uniqueColumns) > 0 {
-		var err error
 		if trees, err = t.indexes(); err != nil {
 			return err
 		}
@@ -880,38 +922,51 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 	var oldKeys [][]any
 	var updated [][]any
 	conflicts := make(map[int]bool, len(uniqueColumns))
-	for fileRow, err := range t.file.Scan() {
-		if err != nil {
-			return err
-		}
-		row, err := DecodeRow(t.Columns, fileRow.Bytes)
-		if err != nil {
-			return err
-		}
-		matched, err := evalWhere(where, row, columnIndex, t.Columns)
-		if err != nil {
-			return err
-		}
-		if !matched {
-			// A column with an index is checked after the scan; one without
-			// is checked here. A matched row's own old value is deliberately
-			// excluded, so re-assigning a column back to its current value
-			// never self-conflicts.
-			for _, idx := range uniqueColumns {
-				if trees[idx] == nil && row[idx] != nil && row[idx] == assigned[idx] {
-					conflicts[idx] = true
-				}
+	if usable {
+		for _, f := range fetched {
+			oldIDs = append(oldIDs, f.id)
+			if trackKeys {
+				oldKeys = append(oldKeys, keyValuesAt(f.row, keyCols))
 			}
-			continue
+			for _, a := range resolved {
+				f.row[a.index] = a.value
+			}
+			updated = append(updated, f.row)
 		}
-		oldIDs = append(oldIDs, fileRow.ID)
-		if trackKeys {
-			oldKeys = append(oldKeys, keyValuesAt(row, keyCols))
+	} else {
+		for fileRow, err := range t.file.Scan() {
+			if err != nil {
+				return err
+			}
+			row, err := DecodeRow(t.Columns, fileRow.Bytes)
+			if err != nil {
+				return err
+			}
+			matched, err := evalWhere(where, row, columnIndex, t.Columns)
+			if err != nil {
+				return err
+			}
+			if !matched {
+				// A column with an index is checked after the scan; one
+				// without is checked here. A matched row's own old value is
+				// deliberately excluded, so re-assigning a column back to its
+				// current value never self-conflicts.
+				for _, idx := range uniqueColumns {
+					if trees[idx] == nil && row[idx] != nil && row[idx] == assigned[idx] {
+						conflicts[idx] = true
+					}
+				}
+				continue
+			}
+			oldIDs = append(oldIDs, fileRow.ID)
+			if trackKeys {
+				oldKeys = append(oldKeys, keyValuesAt(row, keyCols))
+			}
+			for _, a := range resolved {
+				row[a.index] = a.value
+			}
+			updated = append(updated, row)
 		}
-		for _, a := range resolved {
-			row[a.index] = a.value
-		}
-		updated = append(updated, row)
 	}
 
 	if len(updated) > 0 {
