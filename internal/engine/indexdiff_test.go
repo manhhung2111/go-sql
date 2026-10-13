@@ -26,7 +26,7 @@ func randName(rng *rand.Rand) string  { return fmt.Sprintf("n%d", rng.Intn(4)) }
 // coerced. The expression is built once so both tables see the same one.
 func randomWhere(rng *rand.Rand) parser.Expression {
 	id := func() parser.Token { return numTok(fmt.Sprint(rng.Intn(25))) }
-	switch rng.Intn(9) {
+	switch rng.Intn(14) {
 	case 0:
 		return nil
 	case 1:
@@ -43,6 +43,16 @@ func randomWhere(rng *rand.Rand) parser.Expression {
 		return cmp(id(), parser.EQ, identTok("id"))
 	case 7:
 		return cmp(identTok("name"), parser.EQ, strTok(randName(rng)))
+	case 8:
+		return binaryExpr(cmp(identTok("id"), parser.EQ, id()), parser.AND, cmp(identTok("email"), parser.EQ, strTok(randEmail(rng))))
+	case 9:
+		return binaryExpr(cmp(identTok("id"), parser.EQ, id()), parser.AND, cmp(identTok("id"), parser.GTE, id()))
+	case 10:
+		return binaryExpr(cmp(identTok("email"), parser.EQ, strTok(randEmail(rng))), parser.AND, cmp(identTok("name"), parser.NEQ, strTok(randName(rng))))
+	case 11:
+		return binaryExpr(cmp(id(), parser.EQ, identTok("id")), parser.AND, cmp(strTok(randName(rng)), parser.EQ, identTok("name")))
+	case 12:
+		return binaryExpr(cmp(identTok("id"), parser.EQ, id()), parser.AND, cmp(identTok("nosuch"), parser.EQ, numTok("1")))
 	default:
 		return cmp(identTok("id"), parser.EQ, strTok("oops"))
 	}
