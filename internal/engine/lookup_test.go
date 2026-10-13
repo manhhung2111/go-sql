@@ -53,6 +53,7 @@ func TestPlanLookup(t *testing.T) {
 		{"nested AND with two keys", andExpr(andExpr(eqCmp("id", numTok("3")), eqCmp("name", strTok("x"))), eqCmp("email", strTok("e"))),
 			[]lookupPlan{{colID, int64(3)}, {colEmail, "e"}}},
 		{"not a key column", eqCmp("name", strTok("x")), nil},
+		{"an operator the scan rejects", andExpr(eqCmp("id", numTok("3")), cmp(identTok("name"), parser.AND, strTok("a"))), nil},
 		{"a range on the key", cmp(identTok("id"), parser.GTE, numTok("3")), nil},
 		{"not equal on the key", cmp(identTok("id"), parser.NEQ, numTok("3")), nil},
 		{"OR", orExpr(eqCmp("id", numTok("3")), eqCmp("id", numTok("4"))), nil},
@@ -369,4 +370,18 @@ func TestLookup_ConcurrentSelectsBuildTheIndexesOnce(t *testing.T) {
 	wg.Wait()
 
 	assert.EqualValues(t, 1, cf.scans.Load(), "one scan, to build the indexes")
+}
+
+func TestLookup_ADegradedKeyColumnStillScans(t *testing.T) {
+	table := keyedTable(t)
+	writeRaw(t, table, []any{int64(1), "same@x.com", "A"})
+	writeRaw(t, table, []any{int64(2), "same@x.com", "B"}) // an interrupted UPDATE left two rows with one email
+	cf := countOn(table)
+
+	resp, err := table.Select([]string{"id"}, eqCmp("email", strTok("same@x.com")))
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"1"}, {"2"}}, resp.Rows, "both rows, as the scan finds them")
+	assert.GreaterOrEqual(t, cf.scans.Load(), int64(1))
+	assert.EqualValues(t, 0, cf.gets.Load())
 }

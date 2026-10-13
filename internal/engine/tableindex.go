@@ -97,7 +97,8 @@ func (t *SqlTable) builtIndexes() map[int]*index.Tree {
 
 // dropIndexes discards the trees; the next indexes call rebuilds them from the
 // heap. Writers call it after any failure that may have left the file and the
-// trees disagreeing.
+// trees disagreeing, and a lookup calls it when an entry points at a row that
+// is not there (possibly under only the read lock; see tableIndexes).
 func (t *SqlTable) dropIndexes() {
 	t.idx.mu.Lock()
 	defer t.idx.mu.Unlock()

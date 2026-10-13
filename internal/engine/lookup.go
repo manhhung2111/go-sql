@@ -21,7 +21,7 @@ type lookupPlan struct {
 // row, so an error in any part of it surfaces as soon as the table has one row,
 // and a lookup that skipped the other rows would hide it. Such a where is an
 // AND chain of comparisons that each have one column and one literal, where the
-// column exists, the literal coerces to a non-NULL value of the column's type,
+// column exists, the literal coerces to a value of the column's type (NULL does not),
 // and a boolean column is compared with = or != only. Anything else (OR, two
 // columns, an unknown column, a literal that does not coerce, NULL) scans.
 func (t *SqlTable) planLookup(where parser.Expression, columnIndex map[string]int) []lookupPlan {
@@ -73,11 +73,17 @@ func (t *SqlTable) columnAgainstLiteral(c *parser.ComparisonExpression, columnIn
 	if !known {
 		return 0, nil, false
 	}
+	switch c.Operator {
+	case parser.EQ, parser.NEQ, parser.LT, parser.LTE, parser.GT, parser.GTE:
+	default:
+		return 0, nil, false // the scan reports "unsupported comparison operator"
+	}
 	if _, isBool := t.Columns[column].DataType.(parser.BooleanDataType); isBool && c.Operator != parser.EQ && c.Operator != parser.NEQ {
 		return 0, nil, false
 	}
+	// A NULL literal does not coerce, so it never reaches a lookup.
 	value, err := coerceValue(t.Columns[column].DataType, literal)
-	if err != nil || value == nil {
+	if err != nil {
 		return 0, nil, false
 	}
 	return column, value, true
