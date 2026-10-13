@@ -1,11 +1,14 @@
 package engine
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"manhhung2111/go-sql/internal/index"
 	"manhhung2111/go-sql/internal/parser"
 )
 
@@ -205,4 +208,165 @@ func TestLookup_SameAnswersAndErrorsAsTheScan(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestLookup_DeleteByKeyTouchesOneRow(t *testing.T) {
+	table := builtKeyedTable(t)
+	cf := countOn(table)
+
+	require.NoError(t, table.Delete(eqCmp("id", numTok("2"))))
+	assert.EqualValues(t, 0, cf.scans.Load())
+	assert.EqualValues(t, 1, cf.gets.Load())
+	assert.Len(t, fileRows(t, table), 4)
+	assertIndexesMatchHeap(t, table)
+
+	cf.gets.Store(0)
+	require.NoError(t, table.Delete(andExpr(eqCmp("id", numTok("3")), eqCmp("name", strTok("wrong")))))
+	assert.Len(t, fileRows(t, table), 4, "a key whose row fails the rest of the WHERE is left alone")
+	assert.EqualValues(t, 1, cf.gets.Load())
+
+	require.NoError(t, table.Delete(eqCmp("id", numTok("99"))))
+	assert.EqualValues(t, 1, cf.gets.Load(), "an absent key reads nothing")
+	assertIndexesMatchHeap(t, table)
+}
+
+func TestLookup_UpdateByKeyTouchesOneRow(t *testing.T) {
+	table := builtKeyedTable(t)
+	cf := countOn(table)
+
+	require.NoError(t, table.Update([]parser.Assignment{{Column: "name", Value: strTok("z")}}, eqCmp("id", numTok("2"))))
+	assert.EqualValues(t, 0, cf.scans.Load())
+	assert.EqualValues(t, 1, cf.gets.Load())
+	assertIndexesMatchHeap(t, table)
+	cf.scans.Store(0) // the helper above scans to build a fresh copy
+	resp, err := table.Select([]string{"name"}, eqCmp("id", numTok("2")))
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"z"}}, resp.Rows)
+
+	err = table.Update([]parser.Assignment{{Column: "email", Value: strTok("u4@x.com")}}, eqCmp("id", numTok("2")))
+	assert.EqualError(t, err, `duplicate entry u4@x.com for column "email"`)
+	assert.EqualValues(t, 0, cf.scans.Load(), "the conflict was found through the index too")
+
+	require.NoError(t, table.Update([]parser.Assignment{{Column: "email", Value: strTok("u2@x.com")}}, eqCmp("id", numTok("2"))),
+		"re-assigning a row's own value is not a conflict")
+	cf.gets.Store(0)
+	require.NoError(t, table.Update([]parser.Assignment{{Column: "name", Value: strTok("q")}}, eqCmp("id", numTok("99"))))
+	assert.EqualValues(t, 0, cf.gets.Load())
+	assertIndexesMatchHeap(t, table)
+}
+
+func TestLookup_UpdatingAColumnWithoutATreeStillScans(t *testing.T) {
+	table := keyedTable(t)
+	writeRaw(t, table, []any{int64(1), "same@x.com", "A"})
+	writeRaw(t, table, []any{int64(2), "same@x.com", "B"}) // an interrupted UPDATE left two rows with one email
+	writeRaw(t, table, []any{int64(3), "c@x.com", "C"})
+	cf := countOn(table)
+
+	err := table.Update([]parser.Assignment{{Column: "email", Value: strTok("same@x.com")}}, eqCmp("id", numTok("3")))
+
+	assert.EqualError(t, err, `duplicate entry same@x.com for column "email"`, "found by the scan, since email has no tree")
+	assert.GreaterOrEqual(t, cf.scans.Load(), int64(1))
+}
+
+// A point statement can be the first thing to need the indexes. It builds them
+// while looking the row up, and must still update them afterwards.
+func TestLookup_TheStatementThatBuildsTheIndexesStillMaintainsThem(t *testing.T) {
+	statements := map[string]func(table *SqlTable) error{
+		"delete": func(table *SqlTable) error { return table.Delete(eqCmp("id", numTok("3"))) },
+		"update a plain column": func(table *SqlTable) error {
+			return table.Update([]parser.Assignment{{Column: "name", Value: strTok("z")}}, eqCmp("id", numTok("3")))
+		},
+		"update a key column": func(table *SqlTable) error {
+			return table.Update([]parser.Assignment{{Column: "email", Value: strTok("new@x.com")}}, eqCmp("id", numTok("3")))
+		},
+	}
+	for name, run := range statements {
+		t.Run(name, func(t *testing.T) {
+			table := keyedTable(t)
+			for i := 1; i <= 5; i++ {
+				writeRaw(t, table, []any{int64(i), fmt.Sprintf("u%d@x.com", i), fmt.Sprintf("n%d", i)})
+			}
+			require.Nil(t, table.builtIndexes())
+
+			require.NoError(t, run(table))
+
+			assertIndexesMatchHeap(t, table)
+		})
+	}
+}
+
+// An index entry whose row is gone means the index is wrong. The statement
+// still answers correctly, and the index is rebuilt for the next one.
+func TestLookup_AStaleEntryFallsBackToTheScanAndDiscardsTheIndexes(t *testing.T) {
+	staleTable := func(t *testing.T) *SqlTable {
+		table := builtKeyedTable(t)
+		key, err := index.EncodeKey(int64(3))
+		require.NoError(t, err)
+		id, found := table.builtIndexes()[colID].Get(key)
+		require.True(t, found)
+		require.NoError(t, table.file.Delete(id)) // behind the index's back
+		return table
+	}
+
+	t.Run("select", func(t *testing.T) {
+		table := staleTable(t)
+
+		resp, err := table.Select([]string{"*"}, eqCmp("id", numTok("3")))
+
+		require.NoError(t, err)
+		assert.Equal(t, [][]string{}, resp.Rows)
+		assert.Nil(t, table.builtIndexes(), "the wrong index is discarded")
+
+		resp, err = table.Select([]string{"*"}, eqCmp("id", numTok("4")))
+		require.NoError(t, err)
+		assert.Equal(t, [][]string{{"4", "u4@x.com", "n4"}}, resp.Rows)
+		assertIndexesMatchHeap(t, table)
+	})
+	t.Run("delete", func(t *testing.T) {
+		table := staleTable(t)
+
+		require.NoError(t, table.Delete(eqCmp("id", numTok("3"))))
+
+		assert.Len(t, fileRows(t, table), 4)
+		_, err := table.indexes()
+		require.NoError(t, err)
+		assertIndexesMatchHeap(t, table)
+	})
+	t.Run("update", func(t *testing.T) {
+		table := staleTable(t)
+
+		require.NoError(t, table.Update([]parser.Assignment{{Column: "name", Value: strTok("z")}}, eqCmp("id", numTok("3"))))
+
+		assert.Len(t, fileRows(t, table), 4)
+		_, err := table.indexes()
+		require.NoError(t, err)
+		assertIndexesMatchHeap(t, table)
+	})
+}
+
+// Select holds only the read lock, so several point selects can race to build
+// the indexes: they must build them once and all get the right row.
+func TestLookup_ConcurrentSelectsBuildTheIndexesOnce(t *testing.T) {
+	table := keyedTable(t)
+	for i := 0; i < 200; i++ {
+		writeRaw(t, table, []any{int64(i), fmt.Sprintf("u%d@x.com", i), "n"})
+	}
+	cf := countOn(table)
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := g; i < 200; i += 8 {
+				resp, err := table.Select([]string{"id"}, eqCmp("id", numTok(fmt.Sprint(i))))
+				if assert.NoError(t, err) {
+					assert.Equal(t, [][]string{{fmt.Sprint(i)}}, resp.Rows)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	assert.EqualValues(t, 1, cf.scans.Load(), "one scan, to build the indexes")
 }
