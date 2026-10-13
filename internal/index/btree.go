@@ -108,10 +108,16 @@ type Tree struct {
 	size      int
 }
 
+// MaxKeyLenFor is the longest key a tree with nodes of nodeBytes bytes
+// accepts. It is below 1 when nodeBytes is too small for New.
+func MaxKeyLenFor(nodeBytes int) int {
+	return (nodeBytes-nodeHeaderSize)/minEntriesPerNode - (keyLenSize + rowIDSize)
+}
+
 // New returns an empty tree whose nodes hold at most nodeBytes bytes. It fails
 // if nodeBytes is too small to hold a key of even one byte.
 func New(nodeBytes int) (*Tree, error) {
-	maxKey := (nodeBytes-nodeHeaderSize)/minEntriesPerNode - (keyLenSize + rowIDSize)
+	maxKey := MaxKeyLenFor(nodeBytes)
 	if maxKey < 1 {
 		return nil, fmt.Errorf("node size of %d bytes is too small", nodeBytes)
 	}
