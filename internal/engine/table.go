@@ -536,8 +536,10 @@ func discardFile(tf tableFile) {
 // each matching row down to columns ("*" expands to every column in schema
 // order). Only the matching, projected rows are held in memory. Rows come
 // back in the file's order: insertion order, except that an updated row has
-// moved to the end. A where that pins a PRIMARY KEY/UNIQUE column to a literal
-// and cannot fail on any row reads just that row through the index instead.
+// moved to the end. A where that pins or bounds a PRIMARY KEY/UNIQUE column
+// with a literal and cannot fail on any row reads just the matching rows
+// through the index instead (one row for an equality, at most maxRangeRows for
+// a range), in the same order.
 func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -577,7 +579,7 @@ func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, 
 		rows = append(rows, projected)
 	}
 
-	// A WHERE that pins a PRIMARY KEY/UNIQUE column to a literal is served
+	// A WHERE that pins or bounds a PRIMARY KEY/UNIQUE column is served
 	// from the index; see lookupRows.
 	fetched, usable, err := t.lookupRows(where, columnIndex, nil)
 	if err != nil {
@@ -770,7 +772,7 @@ func (t *SqlTable) Delete(where parser.Expression) error {
 
 // deleteFromFile tombstones every live row of the table's file that matches
 // where, then fsyncs once, then removes the rows from the table's indexes. A
-// where that pins a key is served from the index instead of a scan.
+// where that pins or bounds a key is served from the index instead of a scan.
 // The matching rows are collected before the first tombstone is written, so
 // an evaluation error touches nothing, and a row is never tombstoned while
 // the scan is still reading its page; only an I/O error can leave the delete
@@ -781,7 +783,7 @@ func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[strin
 		return fmt.Errorf("table %q is closed", t.Name)
 	}
 
-	// A where that pins a key is served from the index. That can build the
+	// A where that pins or bounds a key is served from the index. That can build the
 	// indexes, so whether there is an index to update is decided afterwards.
 	fetched, usable, err := t.lookupRows(where, columnIndex, nil)
 	if err != nil {
@@ -851,7 +853,7 @@ type resolvedAssignment struct {
 // assigned column. NOT NULL is a non-issue here: the parser only accepts a
 // STRING or NUMBER literal on the right of SET, so an assignment can never
 // produce NULL. The matching rows are found by one scan of the table's file, or
-// by one index lookup when where pins a key and cannot fail. A
+// by one index lookup when where pins or bounds a key and cannot fail. A
 // unique column is in conflict when a row that is not being updated already
 // holds the assigned value: an indexed column looks the value up, and a column
 // without an index notices it during the scan. Every new version is encoded
@@ -899,7 +901,7 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 		}
 	}
 
-	// A where that pins a key is served from the index, but only if every
+	// A where that pins or bounds a key is served from the index, but only if every
 	// unique column being assigned has a tree: the conflict check for a column
 	// without one needs the scan of the other rows. That can build the
 	// indexes, so whether there is an index to update is decided afterwards.

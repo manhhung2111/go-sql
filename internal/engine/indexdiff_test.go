@@ -64,7 +64,8 @@ func randomWhere(rng *rand.Rand) parser.Expression {
 	case 17:
 		return binaryExpr(cmp(identTok("id"), parser.GTE, id()), parser.AND, cmp(identTok("name"), parser.EQ, strTok(randName(rng))))
 	case 18:
-		return cmp(id(), parser.LT, identTok("id"))
+		ops := []parser.TokenType{parser.LT, parser.LTE, parser.GT, parser.GTE}
+		return cmp(id(), ops[rng.Intn(len(ops))], identTok("id"))
 	default:
 		return cmp(identTok("id"), parser.EQ, strTok("oops"))
 	}
