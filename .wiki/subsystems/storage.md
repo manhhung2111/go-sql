@@ -26,13 +26,13 @@ A heap file is a sequence of 16KiB pages. Each page has a 12-byte header (checks
 
 `Scan` yields every live row in page order, verifying each page's checksum and page number; a corrupt page ends the scan with its error. `OpenFile` rejects a file that is not a whole number of pages. `Scan` reads pages straight through `PageFile.ReadPage` and does not use a cache.
 
-`File.Get(id RowID) ([]byte, error)` reads a row by its address through the page file without scanning, verifying checksums and slotted layout, and returns an error wrapping `ErrRowNotFound` if the address is stale (deleted slot, slot out of range, or page out of range).
+`Get` reads one row by its `RowID` without scanning, and fails with `ErrRowNotFound` when the address is stale; see [internal/storage](../code/storage.md).
 
 `NewCachedPageFile` is a write-through LRU cache of immutable page buffers (no pins, no dirty pages) that wraps any `PageFile`. Nothing uses it yet: it is a building block for a future index, and neither the heap file nor `Scan` goes through it.
 
 ## Limits
 
-- No indexes (an in-memory B+ tree and key codec exist as groundwork, but are not yet wired into tables), buffer pool, WAL, overflow pages or space reclamation (a `PageFile` and an unused write-through page cache exist as groundwork for an index, but are not a buffer pool): [tombstone deletes](../decisions/tombstone-deletes-no-reclaim.md), [full scans](../concepts/full-table-scans.md).
+- No wired-in indexes, buffer pool, WAL, overflow pages or space reclamation. An in-memory B+ tree and key codec ([internal/index](../code/index.md)) exist but no table uses them yet. The `PageFile` and the unused write-through page cache are groundwork for an index, not a buffer pool: [tombstone deletes](../decisions/tombstone-deletes-no-reclaim.md), [full scans](../concepts/full-table-scans.md).
 - A row over `MaxRowSize` (16368 bytes) is rejected by `Insert`; the engine rejects it earlier so a batch writes nothing.
 
 ## Engine-side encoding

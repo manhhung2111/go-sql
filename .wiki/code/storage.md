@@ -36,7 +36,7 @@ Standard library only. It never imports `internal/parser` or `internal/engine`.
 
 - Page layout (little-endian header): checksum (bytes 0-4, CRC32 over bytes 4 to the end), page number (4-8), slot count (8-10), data start (10-12). The slot array grows forward from the header and row data grows backward from the page end.
 - `MaxRowSize` is `16384 - 12 - 4 = 16368` bytes: a full page minus the header and the row's own slot.
-- `PageFile` provides random page-level access (`ReadPage`, `WritePage`, `AllocatePage`) verifying and stamps the 8 format-neutral header bytes.
+- `PageFile` provides random page-level access (`ReadPage`, `WritePage`, `AllocatePage`) verifying and stamping the 8 format-neutral header bytes.
 - `NewCachedPageFile` wraps a `PageFile` with a write-through LRU cache of immutable buffers (no pins, no dirty pages; replacements replace cached frames, and failed writes drop the entry).
 - `File.Get(id RowID) ([]byte, error)`: reads a copy of the row at the given address without scanning. Fails with an error wrapping `ErrRowNotFound` if no live row exists there. Reads through the page file and touches no mutable state.
 - `File.Scan()` is an `iter.Seq2[Row, error]`: it verifies each page's checksum and page number and ends with an error on a corrupt page. `Row.Bytes` is only valid until the next iteration.
