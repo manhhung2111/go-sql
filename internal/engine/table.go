@@ -536,7 +536,8 @@ func discardFile(tf tableFile) {
 // each matching row down to columns ("*" expands to every column in schema
 // order). Only the matching, projected rows are held in memory. Rows come
 // back in the file's order: insertion order, except that an updated row has
-// moved to the end.
+// moved to the end. A where that pins a PRIMARY KEY/UNIQUE column to a literal
+// and cannot fail on any row reads just that row through the index instead.
 func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -568,6 +569,27 @@ func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, 
 	}
 
 	rows := make([][]string, 0)
+	project := func(row []any) {
+		projected := make([]string, len(outputIndices))
+		for i, idx := range outputIndices {
+			projected[i] = stringifyValue(row[idx])
+		}
+		rows = append(rows, projected)
+	}
+
+	// A WHERE that pins a PRIMARY KEY/UNIQUE column to a literal is served
+	// from the index; see lookupRows.
+	fetched, usable, err := t.lookupRows(where, columnIndex, nil)
+	if err != nil {
+		return Response{}, err
+	}
+	if usable {
+		for _, f := range fetched {
+			project(f.row)
+		}
+		return Response{Columns: outputColumns, Rows: rows}, nil
+	}
+
 	for fileRow, err := range t.file.Scan() {
 		if err != nil {
 			return Response{}, err
@@ -583,12 +605,7 @@ func (t *SqlTable) Select(columns []string, where parser.Expression) (Response, 
 		if !matched {
 			continue
 		}
-
-		projected := make([]string, len(outputIndices))
-		for i, idx := range outputIndices {
-			projected[i] = stringifyValue(row[idx])
-		}
-		rows = append(rows, projected)
+		project(row)
 	}
 
 	return Response{Columns: outputColumns, Rows: rows}, nil
