@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -480,4 +481,35 @@ func TestRangeLookup_AStaleEntryFallsBackToTheScan(t *testing.T) {
 
 	assert.Equal(t, [][]string{{"2"}, {"4"}}, got)
 	assert.Nil(t, table.builtIndexes(), "the wrong index is discarded")
+}
+
+// With the real factor and wide rows some random ranges are lookups and some
+// scan; either way the answers and the file must match an unindexed table, also
+// after UPDATEs have moved rows.
+func TestRangeLookup_MatchesTheScanOnWideRowsWithTheRealFactor(t *testing.T) {
+	withCostFactor(t, 2)
+	rng := rand.New(rand.NewSource(11))
+	order := rng.Perm(320)
+	indexed, plain := wideKeys(t, order), wideKeys(t, order)
+	plain.noIndexes = true
+	cf := countOn(indexed)
+	ops := []parser.TokenType{parser.LT, parser.LTE, parser.GT, parser.GTE}
+
+	for step := 0; step < 300; step++ {
+		lo, width := rng.Intn(320), 1+rng.Intn(60)
+		where := andExpr(
+			cmp(identTok("id"), ops[2+rng.Intn(2)], numTok(fmt.Sprint(lo))),
+			cmp(identTok("id"), ops[rng.Intn(2)], numTok(fmt.Sprint(lo+width))))
+		if rng.Intn(5) == 0 {
+			assign := []parser.Assignment{{Column: "pad", Value: strTok(strings.Repeat("y", 1000))}}
+			require.NoError(t, indexed.Update(assign, where))
+			require.NoError(t, plain.Update(assign, where))
+			require.Equal(t, fileRows(t, plain), fileRows(t, indexed), "step %d", step)
+			continue
+		}
+		require.Equal(t, idsOf(t, plain, where), idsOf(t, indexed, where), "step %d", step)
+	}
+	assertIndexesMatchHeap(t, indexed)
+	assert.Greater(t, cf.scans.Load(), int64(0), "some ranges must have scanned")
+	assert.Greater(t, cf.getManyCalls.Load(), int64(0), "and some must have been lookups")
 }

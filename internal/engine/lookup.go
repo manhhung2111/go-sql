@@ -191,10 +191,10 @@ var rangeCostFactor = 2
 // lookupRows serves where from an index when it can. usable is false when the
 // statement must scan instead; otherwise rows holds the rows that satisfy
 // where, in file order (the scan's order). A key pinned with = yields at most
-// one row; a bounded range yields its rows when they lie on few enough pages (see rangeCostFactor). needTrees are columns
-// that must have a tree for a lookup to be enough (an UPDATE's assigned unique
-// columns). It may build the indexes, or discard them if one disagrees with the
-// file. Callers hold t.mu.
+// one row; a bounded range yields its rows when they lie on few enough pages
+// (see rangeCostFactor). needTrees are columns that must have a tree for a
+// lookup to be enough (an UPDATE's assigned unique columns). It may build the
+// indexes, or discard them if one disagrees with the file. Callers hold t.mu.
 func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]int, needTrees []int) (rows []fetchedRow, usable bool, err error) {
 	plans := t.planLookup(where, columnIndex)
 	if len(plans.equalities) == 0 && len(plans.ranges) == 0 {
