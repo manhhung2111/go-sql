@@ -225,8 +225,10 @@ func restart(t *testing.T, dir string, old Catalog) (Catalog, Engine) {
 // countingFile wraps a storage.File and counts the scans and gets made on it.
 type countingFile struct {
 	storage.File
-	scans atomic.Int64
-	gets  atomic.Int64
+	scans        atomic.Int64
+	gets         atomic.Int64 // rows fetched by Get or GetMany
+	pageReads    atomic.Int64 // pages a Get or GetMany would read
+	getManyCalls atomic.Int64
 }
 
 func (f *countingFile) Scan() iter.Seq2[storage.Row, error] {
@@ -236,7 +238,28 @@ func (f *countingFile) Scan() iter.Seq2[storage.Row, error] {
 
 func (f *countingFile) Get(id storage.RowID) ([]byte, error) {
 	f.gets.Add(1)
+	f.pageReads.Add(1)
 	return f.File.Get(id)
+}
+
+func (f *countingFile) GetMany(ids []storage.RowID) ([][]byte, error) {
+	f.getManyCalls.Add(1)
+	f.gets.Add(int64(len(ids)))
+	runs := 0
+	for i, id := range ids {
+		if i == 0 || id.Page != ids[i-1].Page {
+			runs++
+		}
+	}
+	f.pageReads.Add(int64(runs))
+	return f.File.GetMany(ids)
+}
+
+func (f *countingFile) reset() {
+	f.scans.Store(0)
+	f.gets.Store(0)
+	f.pageReads.Store(0)
+	f.getManyCalls.Store(0)
 }
 
 // countOn replaces the table's file with a counting wrapper around it.

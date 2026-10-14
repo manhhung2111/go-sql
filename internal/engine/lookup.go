@@ -181,15 +181,17 @@ type fetchedRow struct {
 	row []any
 }
 
-// maxRangeRows is the most rows a range lookup fetches. Each fetch reads a
-// page, while a scan reads each page once, so a range that holds more rows than
-// this is left to the scan. It is a variable so a test can lower it.
-var maxRangeRows = 100
+// rangeCostFactor is how many pages a scan may read per page a range lookup
+// reads before the lookup stops being worth it: a lookup's reads are scattered
+// and a scan's are sequential. A range is a lookup while its rows lie on at
+// most 1/rangeCostFactor of the file's pages. It is a variable so a test can
+// set it to 0, which makes every range a lookup.
+var rangeCostFactor = 2
 
 // lookupRows serves where from an index when it can. usable is false when the
 // statement must scan instead; otherwise rows holds the rows that satisfy
 // where, in file order (the scan's order). A key pinned with = yields at most
-// one row; a bounded range yields at most maxRangeRows. needTrees are columns
+// one row; a bounded range yields its rows when they lie on few enough pages (see rangeCostFactor). needTrees are columns
 // that must have a tree for a lookup to be enough (an UPDATE's assigned unique
 // columns). It may build the indexes, or discard them if one disagrees with the
 // file. Callers hold t.mu.
@@ -244,18 +246,25 @@ func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]in
 }
 
 // rangeRows fetches the rows whose key lies in plan's range and that satisfy
-// where, in file order. It reports not usable if the range holds more than
-// maxRangeRows rows or an entry is stale.
+// where, in file order. It reports not usable if the rows lie on more than
+// 1/rangeCostFactor of the file's pages, or an entry is stale.
 func (t *SqlTable) rangeRows(tree *index.Tree, plan rangePlan, where parser.Expression, columnIndex map[string]int) ([]fetchedRow, bool, error) {
+	filePages := int(t.file.NumPages())
+	seen := make(map[int32]struct{})
 	var ids []storage.RowID
 	for _, id := range tree.Range(plan.lo, plan.hi) {
-		if len(ids) == maxRangeRows {
+		seen[id.Page] = struct{}{}
+		if rangeCostFactor*len(seen) > filePages {
 			return nil, false, nil
 		}
 		ids = append(ids, id)
 	}
+	if len(ids) == 0 {
+		return nil, true, nil
+	}
 	// The scan returns rows by page and slot; so must we, or results and the
-	// order of an UPDATE's new versions would depend on the access path.
+	// order of an UPDATE's new versions would depend on the access path. It
+	// also puts the rows of one page next to each other for GetMany.
 	slices.SortFunc(ids, func(a, b storage.RowID) int {
 		if a.Page != b.Page {
 			if a.Page < b.Page {
@@ -266,18 +275,22 @@ func (t *SqlTable) rangeRows(tree *index.Tree, plan rangePlan, where parser.Expr
 		return a.Slot - b.Slot
 	})
 
+	encoded, err := t.file.GetMany(ids)
+	if errors.Is(err, storage.ErrRowNotFound) {
+		t.dropIndexes()
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
 	var rows []fetchedRow
-	for _, id := range ids {
-		row, matched, stale, err := t.fetchMatching(id, where, columnIndex)
+	for i, b := range encoded {
+		row, matched, err := t.matchRow(b, where, columnIndex)
 		if err != nil {
 			return nil, false, err
 		}
-		if stale {
-			t.dropIndexes()
-			return nil, false, nil
-		}
 		if matched {
-			rows = append(rows, fetchedRow{id: id, row: row})
+			rows = append(rows, fetchedRow{id: ids[i], row: row})
 		}
 	}
 	return rows, true, nil
@@ -293,12 +306,18 @@ func (t *SqlTable) fetchMatching(id storage.RowID, where parser.Expression, colu
 	if err != nil {
 		return nil, false, false, err
 	}
+	row, matched, err = t.matchRow(b, where, columnIndex)
+	return row, matched, false, err
+}
+
+// matchRow decodes an encoded row and reports whether it satisfies where.
+func (t *SqlTable) matchRow(b []byte, where parser.Expression, columnIndex map[string]int) (row []any, matched bool, err error) {
 	if row, err = DecodeRow(t.Columns, b); err != nil {
-		return nil, false, false, err
+		return nil, false, err
 	}
 	matched, err = evalWhere(where, row, columnIndex, t.Columns)
 	if err != nil {
-		return nil, false, false, err
+		return nil, false, err
 	}
-	return row, matched, false, nil
+	return row, matched, nil
 }
