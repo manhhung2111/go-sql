@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,6 +39,8 @@ func TestPlanLookup_Ranges(t *testing.T) {
 		{"<=", idCmp(parser.LTE, "3"), []rangePlan{{colID, nil, after(id(3))}}},
 		{"reversed: 3 < id is id > 3", cmp(numTok("3"), parser.LT, identTok("id")), []rangePlan{{colID, after(id(3)), nil}}},
 		{"reversed: 3 >= id is id <= 3", cmp(numTok("3"), parser.GTE, identTok("id")), []rangePlan{{colID, nil, after(id(3))}}},
+		{"reversed: 3 <= id is id >= 3", cmp(numTok("3"), parser.LTE, identTok("id")), []rangePlan{{colID, id(3), nil}}},
+		{"reversed: 3 > id is id < 3", cmp(numTok("3"), parser.GT, identTok("id")), []rangePlan{{colID, nil, id(3)}}},
 		{"a pair of bounds", andExpr(idCmp(parser.GTE, "3"), idCmp(parser.LT, "10")), []rangePlan{{colID, id(3), id(10)}}},
 		{"the greater lower bound wins", andExpr(andExpr(idCmp(parser.GT, "3"), idCmp(parser.GTE, "5")), idCmp(parser.GT, "4")),
 			[]rangePlan{{colID, id(5), nil}}},
@@ -110,24 +113,32 @@ func TestRangeLookup_BoundsAreExact(t *testing.T) {
 		{"<", parser.LT, func(id, lit int) bool { return id < lit }},
 		{"<=", parser.LTE, func(id, lit int) bool { return id <= lit }},
 	}
+	mirrored := map[parser.TokenType]parser.TokenType{parser.GT: parser.LT, parser.GTE: parser.LTE, parser.LT: parser.GT, parser.LTE: parser.GTE}
 	for _, lit := range []int{0, 1, 7, 20, 21} {
 		for _, o := range ops {
-			t.Run(fmt.Sprintf("id %s %d", o.name, lit), func(t *testing.T) {
-				want := [][]string{}
-				for id := 1; id <= 20; id++ {
-					if o.holds(id, lit) {
-						want = append(want, []string{fmt.Sprint(id)})
+			// Written both ways round: "id > 7" and "7 < id" say the same.
+			forms := map[string]parser.Expression{
+				fmt.Sprintf("id %s %d", o.name, lit): cmp(identTok("id"), o.op, numTok(fmt.Sprint(lit))),
+				fmt.Sprintf("%d %s id", lit, map[parser.TokenType]string{parser.GT: "<", parser.GTE: "<=", parser.LT: ">", parser.LTE: ">="}[o.op]): cmp(numTok(fmt.Sprint(lit)), mirrored[o.op], identTok("id")),
+			}
+			for name, where := range forms {
+				t.Run(name, func(t *testing.T) {
+					want := [][]string{}
+					for id := 1; id <= 20; id++ {
+						if o.holds(id, lit) {
+							want = append(want, []string{fmt.Sprint(id)})
+						}
 					}
-				}
-				cf.scans.Store(0)
-				cf.gets.Store(0)
+					cf.scans.Store(0)
+					cf.gets.Store(0)
 
-				got := idsOf(t, table, cmp(identTok("id"), o.op, numTok(fmt.Sprint(lit))))
+					got := idsOf(t, table, where)
 
-				assert.Equal(t, want, got)
-				assert.EqualValues(t, 0, cf.scans.Load(), "no scan")
-				assert.EqualValues(t, len(want), cf.gets.Load(), "one get per row in the range")
-			})
+					assert.Equal(t, want, got)
+					assert.EqualValues(t, 0, cf.scans.Load(), "no scan")
+					assert.EqualValues(t, len(want), cf.gets.Load(), "one get per row in the range")
+				})
+			}
 		}
 	}
 
@@ -148,11 +159,13 @@ func TestRangeLookup_BoundsAreExact(t *testing.T) {
 
 func TestRangeLookup_StringBoundsAreExact(t *testing.T) {
 	table := intKeys(t, sequence(1, 20)...) // emails "e101" .. "e120"
+	require.NoError(t, table.InsertValues(nil, [][]parser.Token{tokRow(numTok("21"), strTok(""), strTok("n"))}))
 	cf := countOn(table)
 	emails := []string{}
 	for id := 1; id <= 20; id++ {
 		emails = append(emails, fmt.Sprintf("e%03d", id+100))
 	}
+	emails = append(emails, "") // id 21 has the empty string for its email
 	ops := []struct {
 		name  string
 		op    parser.TokenType
@@ -173,11 +186,13 @@ func TestRangeLookup_StringBoundsAreExact(t *testing.T) {
 					}
 				}
 				cf.scans.Store(0)
+				cf.gets.Store(0)
 
 				got := idsOf(t, table, cmp(identTok("email"), o.op, strTok(lit)))
 
 				assert.Equal(t, want, got)
 				assert.EqualValues(t, 0, cf.scans.Load(), "no scan")
+				assert.EqualValues(t, len(want), cf.gets.Load(), "one get per row in the range, so no extra rows were read")
 			})
 		}
 	}
@@ -380,4 +395,58 @@ func TestRangeLookup_AStaleEntryFallsBackToTheScan(t *testing.T) {
 
 	assert.Equal(t, [][]string{{"2"}, {"4"}}, got)
 	assert.Nil(t, table.builtIndexes(), "the wrong index is discarded")
+}
+
+// The same claim as above across many pages: rows of a few KB put about five on
+// a page, so a range spans several, and the rows that were moved to the end sit
+// on the last pages.
+func TestRangeLookup_FileOrderAcrossPages(t *testing.T) {
+	build := func() *SqlTable {
+		table := codesTable(t)
+		rows := make([][]parser.Token, 30)
+		padding := strings.Repeat("p", 3000)
+		for i := range rows {
+			rows[i] = tokRow(numTok(fmt.Sprint(i)), strTok(fmt.Sprintf("c%02d", i)), strTok(padding))
+		}
+		require.NoError(t, table.InsertValues(nil, rows))
+		_, err := table.indexes()
+		require.NoError(t, err)
+		return table
+	}
+	indexed, plain := build(), build()
+	plain.noIndexes = true
+	for _, table := range []*SqlTable{indexed, plain} {
+		for _, id := range []string{"4", "11", "17"} {
+			require.NoError(t, table.Update([]parser.Assignment{{Column: "note", Value: strTok("moved")}}, eqCmp("id", numTok(id))))
+		}
+	}
+	cf := countOn(indexed)
+	where := andExpr(cmp(identTok("id"), parser.GTE, numTok("0")), cmp(identTok("id"), parser.LT, numTok("30")))
+
+	got := idsOf(t, indexed, where)
+
+	assert.Equal(t, idsOf(t, plain, where), got, "the scan's order")
+	assert.Len(t, got, 30)
+	assert.Equal(t, [][]string{{"4"}, {"11"}, {"17"}}, got[27:], "the moved rows are last")
+	assert.EqualValues(t, 0, cf.scans.Load(), "and it was a lookup")
+
+	for _, table := range []*SqlTable{indexed, plain} {
+		require.NoError(t, table.Update([]parser.Assignment{{Column: "note", Value: strTok("again")}}, where))
+	}
+	assert.Equal(t, fileRows(t, plain), fileRows(t, indexed), "an UPDATE over the range writes the same file")
+}
+
+// "email < ”" can match nothing, and a second upper bound must not widen it
+// back: the whole WHERE would hide the extra rows, so only the reads show it.
+func TestRangeLookup_AnEmptyUpperBoundStaysEmpty(t *testing.T) {
+	table := intKeys(t, sequence(1, 20)...)
+	cf := countOn(table)
+
+	got := idsOf(t, table, andExpr(
+		cmp(identTok("email"), parser.LT, strTok("")),
+		cmp(identTok("email"), parser.LT, strTok("e105"))))
+
+	assert.Equal(t, [][]string{}, got)
+	assert.EqualValues(t, 0, cf.scans.Load())
+	assert.EqualValues(t, 0, cf.gets.Load(), "no row is in the range")
 }
