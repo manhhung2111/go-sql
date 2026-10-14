@@ -42,6 +42,15 @@ type File interface {
 	// the page cannot be read or fails verification. Like Scan, any number of
 	// Gets may run concurrently with each other and with Scans.
 	Get(id RowID) ([]byte, error)
+	// NumPages returns the number of pages in the file.
+	NumPages() int32
+	// GetMany returns a copy of the row at each id, in the order of ids. Each
+	// run of consecutive ids on one page reads that page once, so ids sorted
+	// by page read each page once. It fails with an error wrapping
+	// ErrRowNotFound if any id has no live row, and returns no rows then. Like
+	// Get, any number of GetManys may run concurrently with each other and
+	// with Gets and Scans.
+	GetMany(ids []RowID) ([][]byte, error)
 	// Scan yields every live row in page order, verifying each page's
 	// checksum as it goes. A corrupt page ends the iteration with its error.
 	Scan() iter.Seq2[Row, error]
@@ -206,31 +215,48 @@ func (f *sqlFile) Scan() iter.Seq2[Row, error] {
 	}
 }
 
-func (f *sqlFile) Get(id RowID) ([]byte, error) {
-	numPages := f.pages.NumPages()
-	if id.Page < 0 || id.Page >= numPages {
-		return nil, fmt.Errorf("%w: page %d out of range [0, %d)", ErrRowNotFound, id.Page, numPages)
-	}
+func (f *sqlFile) NumPages() int32 { return f.pages.NumPages() }
 
-	// Read straight from the page file, like Scan: the tail cache equals the
-	// disk, so the result is the same and Get touches no mutable state.
-	buf, err := f.pages.ReadPage(id.Page)
+func (f *sqlFile) Get(id RowID) ([]byte, error) {
+	rows, err := f.GetMany([]RowID{id})
 	if err != nil {
 		return nil, err
 	}
-	if err := validateLayout(buf); err != nil {
-		return nil, fmt.Errorf("page %d: %w", id.Page, err)
-	}
+	return rows[0], nil
+}
 
-	page := &sqlSlottedPage{buf: buf}
-	if id.Slot < 0 || id.Slot >= page.SlotCount() {
-		return nil, fmt.Errorf("%w: page %d slot %d out of range [0, %d)", ErrRowNotFound, id.Page, id.Slot, page.SlotCount())
+func (f *sqlFile) GetMany(ids []RowID) ([][]byte, error) {
+	numPages := f.pages.NumPages()
+	rows := make([][]byte, len(ids))
+	var page *sqlSlottedPage
+	loaded := int32(-1)
+	for i, id := range ids {
+		if id.Page < 0 || id.Page >= numPages {
+			return nil, fmt.Errorf("%w: page %d out of range [0, %d)", ErrRowNotFound, id.Page, numPages)
+		}
+		if id.Page != loaded {
+			// Read straight from the page file, like Scan: the tail cache
+			// equals the disk, so the result is the same and this touches no
+			// mutable state.
+			buf, err := f.pages.ReadPage(id.Page)
+			if err != nil {
+				return nil, err
+			}
+			if err := validateLayout(buf); err != nil {
+				return nil, fmt.Errorf("page %d: %w", id.Page, err)
+			}
+			page, loaded = &sqlSlottedPage{buf: buf}, id.Page
+		}
+		if id.Slot < 0 || id.Slot >= page.SlotCount() {
+			return nil, fmt.Errorf("%w: page %d slot %d out of range [0, %d)", ErrRowNotFound, id.Page, id.Slot, page.SlotCount())
+		}
+		row, live := page.Row(id.Slot)
+		if !live {
+			return nil, fmt.Errorf("%w: page %d slot %d is deleted", ErrRowNotFound, id.Page, id.Slot)
+		}
+		rows[i] = bytes.Clone(row)
 	}
-	row, live := page.Row(id.Slot)
-	if !live {
-		return nil, fmt.Errorf("%w: page %d slot %d is deleted", ErrRowNotFound, id.Page, id.Slot)
-	}
-	return bytes.Clone(row), nil
+	return rows, nil
 }
 
 func (f *sqlFile) Sync() error { return f.pages.Sync() }

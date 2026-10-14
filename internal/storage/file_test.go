@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -703,6 +704,194 @@ func TestSqlFile_GetsMayRunConcurrentlyWithScans(t *testing.T) {
 			count++
 		}
 		assert.Equal(t, n, count)
+	}()
+	wg.Wait()
+}
+
+// countingPages counts the pages read through it.
+type countingPages struct {
+	PageFile
+	reads int
+}
+
+func (c *countingPages) ReadPage(n int32) ([]byte, error) {
+	c.reads++
+	return c.PageFile.ReadPage(n)
+}
+
+// threePages inserts nine 5000-byte rows, three to a page, so ids[0:3] are on
+// page 0, ids[3:6] on page 1 and ids[6:9] on page 2.
+func threePages(t *testing.T, f File) ([]RowID, [][]byte) {
+	t.Helper()
+	ids := make([]RowID, 9)
+	rows := make([][]byte, 9)
+	for i := range ids {
+		rows[i] = bytes.Repeat([]byte{byte('a' + i)}, 5000)
+		id, err := f.Insert(rows[i])
+		require.NoError(t, err)
+		ids[i] = id
+	}
+	require.Equal(t, int32(0), ids[2].Page)
+	require.Equal(t, int32(1), ids[3].Page)
+	require.Equal(t, int32(2), ids[8].Page)
+	return ids, rows
+}
+
+func TestSqlFile_NumPages(t *testing.T) {
+	f, _ := newTestFile(t)
+	assert.Equal(t, int32(0), f.NumPages())
+
+	threePages(t, f)
+
+	assert.Equal(t, int32(3), f.NumPages())
+}
+
+func TestSqlFile_GetMany(t *testing.T) {
+	t.Run("returns the rows Get returns, in the order of ids, before and after a reopen", func(t *testing.T) {
+		f, path := newTestFile(t)
+		ids, rows := threePages(t, f)
+		reversed := []RowID{ids[8], ids[0], ids[4], ids[3]}
+
+		got, err := f.GetMany(reversed)
+		require.NoError(t, err)
+		require.Equal(t, [][]byte{rows[8], rows[0], rows[4], rows[3]}, got)
+
+		require.NoError(t, f.Close())
+		reopened, err := OpenFile(path)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = reopened.Close() })
+		got, err = reopened.GetMany(ids)
+		require.NoError(t, err)
+		assert.Equal(t, rows, got)
+	})
+
+	t.Run("reads each run of ids on one page once", func(t *testing.T) {
+		inner, err := CreatePageFile(filepath.Join(t.TempDir(), "table.tbl"))
+		require.NoError(t, err)
+		pages := &countingPages{PageFile: inner}
+		f := &sqlFile{pages: pages}
+		t.Cleanup(func() { _ = f.Close() })
+		ids, _ := threePages(t, f)
+
+		tests := []struct {
+			name  string
+			ids   []RowID
+			reads int
+		}{
+			{"all nine, sorted", ids, 3},
+			{"two on one page and one on another", []RowID{ids[0], ids[1], ids[3]}, 2},
+			{"a page revisited after another is read again", []RowID{ids[0], ids[3], ids[1]}, 3},
+			{"the same id twice", []RowID{ids[4], ids[4]}, 1},
+			{"no ids", nil, 0},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				pages.reads = 0
+
+				got, err := f.GetMany(tc.ids)
+
+				require.NoError(t, err)
+				assert.Len(t, got, len(tc.ids))
+				assert.NotNil(t, got, "an empty result is an empty slice")
+				assert.Equal(t, tc.reads, pages.reads)
+			})
+		}
+	})
+
+	t.Run("an address with no live row fails the whole call, wherever it sits", func(t *testing.T) {
+		f, _ := newTestFile(t)
+		ids, _ := threePages(t, f)
+		require.NoError(t, f.Delete(ids[4]))
+		bad := map[string]RowID{
+			"a deleted row":       ids[4],
+			"a slot out of range": {Page: 1, Slot: 9},
+			"a page out of range": {Page: 3, Slot: 0},
+			"a negative page":     {Page: -1, Slot: 0},
+		}
+		for name, id := range bad {
+			for position, list := range map[string][]RowID{
+				"first":  {id, ids[0], ids[8]},
+				"middle": {ids[0], id, ids[8]},
+				"last":   {ids[0], ids[8], id},
+			} {
+				t.Run(name+" "+position, func(t *testing.T) {
+					got, err := f.GetMany(list)
+
+					require.ErrorIs(t, err, ErrRowNotFound)
+					assert.Nil(t, got)
+				})
+			}
+		}
+	})
+
+	t.Run("a corrupt page is an error but not ErrRowNotFound", func(t *testing.T) {
+		f, path := newTestFile(t)
+		ids, _ := threePages(t, f)
+		raw, err := os.OpenFile(path, os.O_RDWR, 0)
+		require.NoError(t, err)
+		_, err = raw.WriteAt([]byte{0xFF}, maxPageSize*2-1) // last byte of page 1
+		require.NoError(t, err)
+		require.NoError(t, raw.Close())
+
+		got, err := f.GetMany([]RowID{ids[0], ids[3]})
+
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrRowNotFound)
+		assert.ErrorContains(t, err, "checksum mismatch")
+		assert.Nil(t, got)
+	})
+
+	t.Run("the returned bytes belong to the caller, even over a cached page file", func(t *testing.T) {
+		inner, err := CreatePageFile(filepath.Join(t.TempDir(), "table.tbl"))
+		require.NoError(t, err)
+		cached, err := NewCachedPageFile(inner, 4)
+		require.NoError(t, err)
+		f := &sqlFile{pages: cached}
+		t.Cleanup(func() { _ = f.Close() })
+		id, err := f.Insert([]byte("abc"))
+		require.NoError(t, err)
+
+		first, err := f.GetMany([]RowID{id})
+		require.NoError(t, err)
+		first[0][0] = 'X'
+		second, err := f.GetMany([]RowID{id})
+
+		require.NoError(t, err)
+		assert.Equal(t, "abc", string(second[0]))
+	})
+}
+
+// GetMany holds only the table's read lock, like Get and Scan. Meaningful
+// under -race.
+func TestSqlFile_GetManyMayRunConcurrentlyWithGetsAndScans(t *testing.T) {
+	f, path := newTestFile(t)
+	ids, rows := threePages(t, f)
+	require.NoError(t, f.Close())
+	f, err := OpenFile(path) // reopened: the tail cache is empty
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = f.Close() })
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				got, err := f.GetMany(ids)
+				if assert.NoError(t, err) {
+					assert.Equal(t, rows, got)
+				}
+				_, err = f.Get(ids[i%9])
+				assert.NoError(t, err)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, err := range f.Scan() {
+			assert.NoError(t, err)
+		}
 	}()
 	wg.Wait()
 }
