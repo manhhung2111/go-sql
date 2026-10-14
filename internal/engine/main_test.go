@@ -9,9 +9,14 @@ import (
 // rule would always scan. Run the package with every range a lookup, and let
 // the tests of the rule itself set the real factor.
 func TestMain(m *testing.M) {
+	shippedRangeCostFactor = rangeCostFactor
 	rangeCostFactor = 0
 	os.Exit(m.Run())
 }
+
+// shippedRangeCostFactor is the factor the engine ships with, before TestMain
+// overrides it.
+var shippedRangeCostFactor int
 
 // withCostFactor sets rangeCostFactor for one test.
 func withCostFactor(t *testing.T, factor int) {

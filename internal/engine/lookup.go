@@ -245,19 +245,29 @@ func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]in
 	return nil, false, nil
 }
 
+// collectRangeIDs walks plan's range and returns the row ids in it. ok is false
+// as soon as they lie on more than 1/rangeCostFactor of filePages pages; ids
+// then holds only what was found before giving up, so a refused range costs a
+// bounded part of the walk.
+func collectRangeIDs(tree *index.Tree, plan rangePlan, filePages int) (ids []storage.RowID, ok bool) {
+	seen := make(map[int32]struct{})
+	for _, id := range tree.Range(plan.lo, plan.hi) {
+		seen[id.Page] = struct{}{}
+		if rangeCostFactor*len(seen) > filePages {
+			return ids, false
+		}
+		ids = append(ids, id)
+	}
+	return ids, true
+}
+
 // rangeRows fetches the rows whose key lies in plan's range and that satisfy
 // where, in file order. It reports not usable if the rows lie on more than
 // 1/rangeCostFactor of the file's pages, or an entry is stale.
 func (t *SqlTable) rangeRows(tree *index.Tree, plan rangePlan, where parser.Expression, columnIndex map[string]int) ([]fetchedRow, bool, error) {
-	filePages := int(t.file.NumPages())
-	seen := make(map[int32]struct{})
-	var ids []storage.RowID
-	for _, id := range tree.Range(plan.lo, plan.hi) {
-		seen[id.Page] = struct{}{}
-		if rangeCostFactor*len(seen) > filePages {
-			return nil, false, nil
-		}
-		ids = append(ids, id)
+	ids, ok := collectRangeIDs(tree, plan, int(t.file.NumPages()))
+	if !ok {
+		return nil, false, nil
 	}
 	if len(ids) == 0 {
 		return nil, true, nil

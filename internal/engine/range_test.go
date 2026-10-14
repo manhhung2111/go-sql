@@ -11,6 +11,7 @@ import (
 
 	"manhhung2111/go-sql/internal/index"
 	"manhhung2111/go-sql/internal/parser"
+	"manhhung2111/go-sql/internal/storage"
 )
 
 func keyOf(t *testing.T, v any) []byte {
@@ -512,4 +513,29 @@ func TestRangeLookup_MatchesTheScanOnWideRowsWithTheRealFactor(t *testing.T) {
 	assertIndexesMatchHeap(t, indexed)
 	assert.Greater(t, cf.scans.Load(), int64(0), "some ranges must have scanned")
 	assert.Greater(t, cf.getManyCalls.Load(), int64(0), "and some must have been lookups")
+}
+
+func TestRangeCostFactor_ShipsAsTwo(t *testing.T) {
+	assert.Equal(t, 2, shippedRangeCostFactor)
+}
+
+// A refused range must stop walking the tree as soon as it is known to be too
+// big, not after visiting every key: here the first 51 pages already break the
+// rule on a 100-page file, so the walk must not reach the 10,000th key.
+func TestCollectRangeIDs_StopsWalkingOnceTheRangeIsTooBig(t *testing.T) {
+	withCostFactor(t, 2)
+	tree, err := index.New(index.DefaultNodeBytes)
+	require.NoError(t, err)
+	for i := 0; i < 10000; i++ {
+		require.NoError(t, tree.Insert(keyOf(t, int64(i)), storage.RowID{Page: int32(i / 10), Slot: i % 10}))
+	}
+
+	ids, ok := collectRangeIDs(tree, rangePlan{}, 100)
+
+	assert.False(t, ok)
+	assert.Less(t, len(ids), 600, "stopped soon after the 51st page, not at the end")
+
+	ids, ok = collectRangeIDs(tree, rangePlan{}, 2000)
+	assert.True(t, ok)
+	assert.Len(t, ids, 10000, "a range within the rule is walked in full")
 }
