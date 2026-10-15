@@ -396,6 +396,11 @@ func (t *SqlTable) appendToFile(rows [][]any) error {
 	if err != nil {
 		return err
 	}
+	if len(encoded) > 0 {
+		if err := t.prepareHeapWrite(); err != nil {
+			return err
+		}
+	}
 
 	ids := make([]storage.RowID, 0, len(encoded))
 	for _, b := range encoded {
@@ -534,6 +539,8 @@ func (t *SqlTable) adoptFile(tf tableFile) error {
 	closeErr := t.closeLocked()
 
 	t.file, t.path, t.fileID = tf.file, tf.path, tf.id
+	t.snapshotMayExist = false
+	t.discardSnapshotFiles(oldPath)
 
 	if err := os.Remove(oldPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return errors.Join(closeErr, fmt.Errorf("column change applied, but removing the old table file %q failed: %w", oldPath, err))
@@ -856,6 +863,11 @@ func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[strin
 		}
 	}
 
+	if len(matched) > 0 {
+		if err := t.prepareHeapWrite(); err != nil {
+			return err
+		}
+	}
 	for _, id := range matched {
 		if err := t.file.Delete(id); err != nil {
 			t.dropIndexes()
@@ -1044,6 +1056,11 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 	if err != nil {
 		return err
 	}
+	if len(encoded) > 0 {
+		if err := t.prepareHeapWrite(); err != nil {
+			return err
+		}
+	}
 	newIDs := make([]storage.RowID, 0, len(encoded))
 	for _, b := range encoded {
 		id, err := t.file.Insert(b)
@@ -1120,6 +1137,7 @@ func (t *SqlTable) Drop() error {
 	defer t.mu.Unlock()
 
 	closeErr := t.closeLocked()
+	t.discardSnapshotFiles(t.path)
 	if err := os.Remove(t.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return errors.Join(closeErr, fmt.Errorf("removing table file %q: %w", t.path, err))
 	}

@@ -2,8 +2,10 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"manhhung2111/go-sql/internal/index"
@@ -90,4 +92,35 @@ func (t *SqlTable) saveSnapshot() {
 		}
 	}
 	_ = index.WriteSnapshot(t.snapshotPath(), t.fileID, t.file.NumPages(), trees)
+}
+
+// prepareHeapWrite makes sure no snapshot of the heap file can survive a write
+// to it: the file is removed, and the removal made durable, before the first
+// write after open. A crash after the write then finds no snapshot, which is a
+// rebuild; without this it would find one that no longer matches. It is a
+// no-op once done, and for tables that cannot have one. When it fails nothing
+// has been written and the statement must fail. Callers hold t.mu for writing.
+func (t *SqlTable) prepareHeapWrite() error {
+	if !t.snapshotMayExist {
+		return nil
+	}
+	path := t.snapshotPath()
+	if err := removeSnapshotFile(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing the index snapshot of table %q: %w", t.Name, err)
+	}
+	if err := syncSnapshotDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("removing the index snapshot of table %q: %w", t.Name, err)
+	}
+	t.snapshotMayExist = false
+	return nil
+}
+
+// discardSnapshotFiles removes the snapshot and any half-written one of the heap
+// file at heapPath. It is best effort: a file left behind is an orphan that
+// startup removes, and never one that can be read, because the heap file it
+// belongs to is gone or has a new id.
+func (t *SqlTable) discardSnapshotFiles(heapPath string) {
+	path := snapshotPathFor(heapPath)
+	_ = removeSnapshotFile(path)
+	_ = removeSnapshotFile(path + ".tmp")
 }

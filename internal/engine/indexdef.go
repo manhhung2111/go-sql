@@ -39,6 +39,7 @@ func (t *SqlTable) CreateIndex(name, column string, ifNotExists bool) error {
 	}
 	t.indexDefs = append(slices.Clone(t.indexDefs), indexDef{name: name, column: column})
 	t.dropIndexes()
+	t.discardSnapshotFiles(t.path)
 	return nil
 }
 
@@ -62,6 +63,7 @@ func (t *SqlTable) DropIndex(name string, ifExists bool) error {
 	}
 	t.indexDefs = slices.Delete(slices.Clone(t.indexDefs), at, at+1)
 	t.dropIndexes()
+	t.discardSnapshotFiles(t.path)
 	return nil
 }
 
