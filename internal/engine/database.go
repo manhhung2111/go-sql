@@ -140,12 +140,15 @@ func (d *SqlDatabase) DropTable(name string, ifExists bool) error {
 	if err := d.store.removeTable(d.Name, name); err != nil {
 		return fmt.Errorf("dropping table %q: %w", name, err)
 	}
-	// The table is gone either way; a leftover index row is swept when a table
-	// of this name is created and dropped at startup.
-	_ = d.store.removeTableIndexes(d.Name, name)
 	delete(d.Table, name)
-	if err := table.Drop(); err != nil {
-		return fmt.Errorf("table %q dropped, but removing its file failed: %w", name, err)
+	dropErr := table.Drop()
+	// The table is closed now, so no CreateIndex on a handle fetched earlier can
+	// add a row after this. A row that cannot be removed stays in the store and
+	// is swept when a table of this name is created or renamed to, and dropped at
+	// startup.
+	_ = d.store.removeTableIndexes(d.Name, name)
+	if dropErr != nil {
+		return fmt.Errorf("table %q dropped, but removing its file failed: %w", name, dropErr)
 	}
 	return nil
 }

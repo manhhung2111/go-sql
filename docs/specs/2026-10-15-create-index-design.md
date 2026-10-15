@@ -68,7 +68,7 @@ CreateIndex(name, column string, ifNotExists bool) error
 DropIndex(name string, ifExists bool) error
 ```
 
-`CreateIndex`, under the table's write lock: fail if the table is closed; look the column up (`column %q does not exist`); fail if the name exists (`index %q already exists on table %q`, or no-op with `IF NOT EXISTS`); write the `sys_indexes` row (insert, sync); append the definition to the table's list; discard the table's trees. `DropIndex` is the mirror: tombstone the row, remove the definition, discard the trees; a missing name is `index %q does not exist on table %q` or a no-op with `IF EXISTS`.
+`CreateIndex`, under the table's write lock: fail if the table is closed; look the column up (`unknown column %q`, as `DROP COLUMN` says); fail if the name exists (`index %q already exists on table %q`, or no-op with `IF NOT EXISTS`); write the `sys_indexes` row (insert, sync); append the definition to the table's list; discard the table's trees. `DropIndex` is the mirror: tombstone the row, remove the definition, discard the trees; a missing name is `index %q does not exist on table %q` or a no-op with `IF EXISTS`.
 
 The table keeps its definitions as a small slice `[]indexDef{name, column string}`, guarded by `Table.mu` like the schema. Lock order is unchanged: `Table.mu` → `tableIndexes.mu` → `catalogStore.mu`.
 
@@ -87,6 +87,8 @@ Because dangling rows are dropped at load, every statement that renames or remov
 - **`ADD COLUMN`** rewrites the file and changes no definition. **`DROP COLUMN`** of an indexed column is refused before anything is written; of any other column it changes no definition.
 
 A crash can only lose an index definition by dropping a row that was dangling; it never loses the table or its data.
+
+An I/O error is different from a crash: a tombstone that fails leaves a row that nothing in memory points at, and once a table of that name has the column, startup cannot tell it from a live one. The store therefore keeps a list of such rows and retries it before the next index operation, which is refused while the retry fails. If the process stops before the retry, the leftover row can come back at the next start; that needs an I/O error and a crash together.
 
 ### Secondary key encoding (`internal/index`)
 

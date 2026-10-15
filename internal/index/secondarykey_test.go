@@ -105,3 +105,10 @@ func TestSecondaryEntries_SortIntoGroups(t *testing.T) {
 	last := slices.IndexFunc(keys, func(k []byte) bool { return bytes.Compare(k, hi) >= 0 })
 	assert.Equal(t, 6, last-first, "both inserts of a, three slots each, contiguous")
 }
+
+func TestEncodeSecondaryKey_RejectsANegativeRowID(t *testing.T) {
+	_, err := EncodeSecondaryKey(int64(1), storage.RowID{Page: -1, Slot: 0})
+	assert.Error(t, err)
+	_, err = EncodeSecondaryKey(int64(1), storage.RowID{Page: 0, Slot: -1})
+	assert.Error(t, err)
+}

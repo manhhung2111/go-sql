@@ -385,3 +385,90 @@ func TestDropTable_RemovesItsIndexRows(t *testing.T) {
 
 	assert.Empty(t, sysIndexRecords(t, storeOf(c)))
 }
+
+// A tombstone that fails leaves a row in sys_indexes that nothing in memory
+// points at. Once a table of that name has the column, startup cannot tell it
+// from a live row, so the store retries it before the next index operation.
+func TestCatalogStore_AFailedTombstoneIsRetriedBeforeTheNextIndexOperation(t *testing.T) {
+	setup := func(t *testing.T) (*catalogStore, *failingFile, *stagedIndexRows) {
+		store := newTestStore(t)
+		require.NoError(t, store.addIndex("shop", "users", "i1", "name"))
+		ff := &failingFile{File: store.indexes}
+		store.indexes = ff
+		staged, err := store.stageIndexRows("shop", "users", "people", nil)
+		require.NoError(t, err)
+		return store, ff, staged
+	}
+
+	t.Run("a commit whose tombstone of the original fails", func(t *testing.T) {
+		store, ff, staged := setup(t)
+		ff.failDeletes = 1
+
+		store.commitStaged(staged)
+		assert.Len(t, sysIndexRecords(t, store), 2, "the original is still on disk")
+		require.NoError(t, store.addIndex("shop", "people", "i2", "age"))
+
+		assert.ElementsMatch(t, []string{"people.i1(name)", "people.i2(age)"}, sysIndexRecords(t, store))
+	})
+	t.Run("an abort whose tombstone of the copy fails", func(t *testing.T) {
+		store, ff, staged := setup(t)
+		ff.failDeletes = 1
+
+		store.abortStaged(staged)
+		assert.Len(t, sysIndexRecords(t, store), 2, "the copy is still on disk")
+		require.NoError(t, store.addIndex("shop", "users", "i2", "age"))
+
+		assert.ElementsMatch(t, []string{"users.i1(name)", "users.i2(age)"}, sysIndexRecords(t, store))
+	})
+	t.Run("an operation is refused while the retry still fails", func(t *testing.T) {
+		store, ff, staged := setup(t)
+		ff.failDeletes = 2
+
+		store.commitStaged(staged)
+
+		assert.ErrorIs(t, store.addIndex("shop", "people", "i2", "age"), errInjected)
+		assert.NoError(t, store.addIndex("shop", "people", "i2", "age"), "and goes through once it succeeds")
+	})
+}
+
+func TestCreateIndex_ALeakedRowDoesNotComeBackAfterADropAndARestart(t *testing.T) {
+	dir, c, e := newIndexEngine(t)
+	mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+	storeOf(c).indexes = &failingFile{File: storeOf(c).indexes, failDeletes: 1}
+	mustExec(t, e, "shop", "ALTER TABLE people RENAME COLUMN age TO years") // copies by_name too; the original's tombstone fails
+
+	mustExec(t, e, "shop", "DROP INDEX by_name ON people")
+	assert.Empty(t, defsOf(t, c, "people"))
+	c, _ = restart(t, dir, c)
+
+	assert.Empty(t, defsOf(t, c, "people"), "the dropped index is not resurrected")
+}
+
+func TestCreateIndex_ALeakedRowDoesNotAttachToANewTableOfTheSameName(t *testing.T) {
+	dir, c, e := newIndexEngine(t)
+	mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+	storeOf(c).indexes = &failingFile{File: storeOf(c).indexes, failDeletes: 1}
+	mustExec(t, e, "shop", "ALTER TABLE people RENAME TO humans")
+
+	mustExec(t, e, "shop", "CREATE TABLE people (id INT PRIMARY KEY, name VARCHAR(20))")
+	c, _ = restart(t, dir, c)
+
+	assert.Empty(t, defsOf(t, c, "people"))
+	assert.Equal(t, []indexDef{{"by_name", "name"}}, defsOf(t, c, "humans"))
+}
+
+// The rows left under a name must be swept when another table is renamed to it,
+// also when the renamed table has no indexes of its own.
+func TestCreateIndex_RenamingOntoANameSweepsLeftoverRows(t *testing.T) {
+	dir, c, e := newIndexEngine(t)
+	mustExec(t, e, "shop", "CREATE TABLE other (id INT PRIMARY KEY, name VARCHAR(20))")
+	mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+	storeOf(c).indexes = &failingFile{File: storeOf(c).indexes, failDeletes: 1}
+	mustExec(t, e, "shop", "DROP TABLE people") // the index row's tombstone fails and stays in the map
+	storeOf(c).indexes = storeOf(c).indexes.(*failingFile).File
+
+	mustExec(t, e, "shop", "ALTER TABLE other RENAME TO people")
+	c, _ = restart(t, dir, c)
+
+	assert.Empty(t, defsOf(t, c, "people"))
+}

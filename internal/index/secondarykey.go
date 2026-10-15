@@ -50,6 +50,9 @@ func valuePart(v any) ([]byte, error) {
 // one value are adjacent and ordered by RowID, which is file order. Page and slot
 // must be non-negative and fit in 32 bits.
 func EncodeSecondaryKey(v any, id storage.RowID) ([]byte, error) {
+	if id.Page < 0 || id.Slot < 0 {
+		return nil, fmt.Errorf("invalid row id %+v", id)
+	}
 	part, err := valuePart(v)
 	if err != nil {
 		return nil, err

@@ -41,7 +41,7 @@ type tableRecord struct {
 	schema   string
 }
 
-// catalogStore owns the two system files and remembers where each live row
+// catalogStore owns the three system files and remembers where each live row
 // is, so a row can be tombstoned without scanning. mu is the last lock in the
 // engine's lock order: it is held only around one catalog write, and nothing
 // in here calls back into a database or table.
@@ -54,7 +54,13 @@ type catalogStore struct {
 	tableRows map[tableKey]storage.RowID
 	indexes   storage.File
 	indexRows map[indexKey]storage.RowID
-	closed    bool
+	// staleIndexRows are index rows that should be gone but whose tombstone, or
+	// the sync after it, failed. Nothing in memory points at them, so no sweep
+	// would find them, and once a table of that name has the column startup
+	// cannot tell them from live rows: they are retried before the next index
+	// operation, which is refused while the retry fails.
+	staleIndexRows []storage.RowID
+	closed         bool
 }
 
 func newCatalogStore(files *fileAllocator, databases, tables, indexes storage.File) *catalogStore {
@@ -69,8 +75,8 @@ func newCatalogStore(files *fileAllocator, databases, tables, indexes storage.Fi
 	}
 }
 
-// openCatalogStore opens <data_dir>/sys/sys_databases.tbl and sys_tables.tbl,
-// creating whichever is missing. It does not read their rows.
+// openCatalogStore opens <data_dir>/sys/sys_databases.tbl, sys_tables.tbl and
+// sys_indexes.tbl, creating whichever is missing. It does not read their rows.
 func openCatalogStore(files *fileAllocator) (*catalogStore, error) {
 	dir := filepath.Join(string(files.dataDir), sysDirName)
 	if err := files.makeDir(dir); err != nil {
@@ -355,6 +361,9 @@ func (s *catalogStore) addIndex(database, table, name, column string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.retryStaleLocked(); err != nil {
+		return err
+	}
 	id, err := insertSynced(s.indexes, row)
 	if err != nil {
 		return err
@@ -366,6 +375,9 @@ func (s *catalogStore) addIndex(database, table, name, column string) error {
 func (s *catalogStore) removeIndex(database, table, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.retryStaleLocked(); err != nil {
+		return err
+	}
 	key := indexKey{database, table, name}
 	id, ok := s.indexRows[key]
 	if !ok {
@@ -378,11 +390,59 @@ func (s *catalogStore) removeIndex(database, table, name string) error {
 	return nil
 }
 
+// retryStaleLocked tombstones the rows in staleIndexRows. It keeps the whole
+// list until every row is gone and the sync has succeeded.
+func (s *catalogStore) retryStaleLocked() error {
+	if len(s.staleIndexRows) == 0 {
+		return nil
+	}
+	var errs []error
+	for _, id := range s.staleIndexRows {
+		if _, err := s.indexes.Get(id); errors.Is(err, storage.ErrRowNotFound) {
+			continue
+		}
+		if err := s.indexes.Delete(id); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) == 0 {
+		if err := s.indexes.Sync(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("removing stale index rows: %w", err)
+	}
+	s.staleIndexRows = nil
+	return nil
+}
+
+// tombstoneBestEffortLocked tombstones ids and syncs. A row it cannot remove, or
+// every row if the sync fails, goes on the stale list to be retried.
+func (s *catalogStore) tombstoneBestEffortLocked(ids []storage.RowID) {
+	var gone []storage.RowID
+	for _, id := range ids {
+		if err := s.indexes.Delete(id); err != nil {
+			s.staleIndexRows = append(s.staleIndexRows, id)
+			continue
+		}
+		gone = append(gone, id)
+	}
+	if len(gone) > 0 {
+		if err := s.indexes.Sync(); err != nil {
+			s.staleIndexRows = append(s.staleIndexRows, gone...)
+		}
+	}
+}
+
 // tombstoneIndexRowsLocked tombstones every known index row for which match is
 // true. A row whose tombstone fails stays in the map so a later sweep retries it.
 func (s *catalogStore) tombstoneIndexRowsLocked(match func(indexKey) bool) error {
+	if err := s.retryStaleLocked(); err != nil {
+		return err
+	}
 	var errs []error
-	removed := false
+	var done []storage.RowID
 	for key, id := range s.indexRows {
 		if !match(key) {
 			continue
@@ -392,11 +452,12 @@ func (s *catalogStore) tombstoneIndexRowsLocked(match func(indexKey) bool) error
 			continue
 		}
 		delete(s.indexRows, key)
-		removed = true
+		done = append(done, id)
 	}
-	if removed {
+	if len(done) > 0 {
 		if err := s.indexes.Sync(); err != nil {
 			errs = append(errs, err)
+			s.staleIndexRows = append(s.staleIndexRows, done...)
 		}
 	}
 	return errors.Join(errs...)
@@ -425,6 +486,16 @@ func (s *catalogStore) stageIndexRows(database, table, newTable string, renames 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Rows left under newTable by an earlier, dropped table are swept first,
+	// also when this table has no index rows to copy.
+	if newTable != table {
+		if err := s.tombstoneIndexRowsLocked(func(k indexKey) bool { return k.database == database && k.table == newTable }); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.retryStaleLocked(); err != nil {
+		return nil, err
+	}
 	staged := &stagedIndexRows{database: database, table: table, newTable: newTable,
 		old: map[indexKey]storage.RowID{}, added: map[indexKey]storage.RowID{}}
 	for key, id := range s.indexRows {
@@ -435,16 +506,12 @@ func (s *catalogStore) stageIndexRows(database, table, newTable string, renames 
 	if len(staged.old) == 0 {
 		return staged, nil
 	}
-	if newTable != table {
-		if err := s.tombstoneIndexRowsLocked(func(k indexKey) bool { return k.database == database && k.table == newTable }); err != nil {
-			return nil, err
-		}
-	}
 	cleanup := func() {
+		ids := make([]storage.RowID, 0, len(staged.added))
 		for _, id := range staged.added {
-			_ = s.indexes.Delete(id)
+			ids = append(ids, id)
 		}
-		_ = s.indexes.Sync()
+		s.tombstoneBestEffortLocked(ids)
 	}
 	for key, id := range staged.old {
 		b, err := s.indexes.Get(id)
@@ -481,16 +548,18 @@ func (s *catalogStore) stageIndexRows(database, table, newTable string, renames 
 }
 
 // commitStaged tombstones the originals and makes the copies the live rows. A
-// failed tombstone is ignored: the load-time check drops the stale row, because
-// the table row it was validated against has already changed.
+// tombstone that fails is retried before the next index operation: until then
+// the original is a duplicate of a live row or names a table that no longer
+// exists, and the load-time check drops it only in the second case.
 func (s *catalogStore) commitStaged(staged *stagedIndexRows) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ids := make([]storage.RowID, 0, len(staged.old))
 	for key, id := range staged.old {
-		_ = s.indexes.Delete(id)
+		ids = append(ids, id)
 		delete(s.indexRows, key)
 	}
-	_ = s.indexes.Sync()
+	s.tombstoneBestEffortLocked(ids)
 	for key, id := range staged.added {
 		s.indexRows[key] = id
 	}
@@ -500,8 +569,9 @@ func (s *catalogStore) commitStaged(staged *stagedIndexRows) {
 func (s *catalogStore) abortStaged(staged *stagedIndexRows) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ids := make([]storage.RowID, 0, len(staged.added))
 	for _, id := range staged.added {
-		_ = s.indexes.Delete(id)
+		ids = append(ids, id)
 	}
-	_ = s.indexes.Sync()
+	s.tombstoneBestEffortLocked(ids)
 }
