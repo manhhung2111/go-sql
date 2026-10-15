@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 
 	"manhhung2111/go-sql/internal/index"
 	"manhhung2111/go-sql/internal/parser"
+	"manhhung2111/go-sql/internal/storage"
 )
 
 func keyOf(t *testing.T, v any) []byte {
@@ -225,27 +227,126 @@ func TestRangeLookup_NegativeIntegers(t *testing.T) {
 	}
 }
 
-func TestRangeLookup_GivesUpOnABigRange(t *testing.T) {
-	table := intKeys(t, sequence(0, 149)...)
+// wideKeys is a table of rows with a 1000-byte padding column, about fifteen to
+// a page, inserted in the order given; ids is also the set of keys. Its indexes
+// are built.
+func wideKeys(t *testing.T, ids []int) *SqlTable {
+	t.Helper()
+	table, err := newTempTable(t, "wide", []parser.ColumnDefinition{
+		{Name: "id", DataType: parser.IntDataType{}, Constraints: []parser.Constraint{parser.PrimaryKeyConstraint{}}},
+		{Name: "email", DataType: parser.VarCharDataType{Size: 100}, Constraints: []parser.Constraint{parser.UniqueConstraint{}}},
+		{Name: "pad", DataType: parser.VarCharDataType{Size: 1200}},
+	})
+	require.NoError(t, err)
+	pad := strings.Repeat("x", 1000)
+	rows := make([][]parser.Token, len(ids))
+	for i, id := range ids {
+		rows[i] = tokRow(numTok(fmt.Sprint(id)), strTok(fmt.Sprintf("e%05d", id)), strTok(pad))
+	}
+	require.NoError(t, table.InsertValues(nil, rows))
+	_, err = table.indexes()
+	require.NoError(t, err)
+	return table
+}
+
+// distinctPages is how many pages hold the rows with lo <= id < hi.
+func distinctPages(t *testing.T, table *SqlTable, lo, hi int) int {
+	t.Helper()
+	pages := map[int32]bool{}
+	for row, err := range table.file.Scan() {
+		require.NoError(t, err)
+		decoded, err := DecodeRow(table.Columns, row.Bytes)
+		require.NoError(t, err)
+		if id := int(decoded[0].(int64)); id >= lo && id < hi {
+			pages[row.ID.Page] = true
+		}
+	}
+	return len(pages)
+}
+
+func idRange(lo, hi int) parser.Expression {
+	return andExpr(cmp(identTok("id"), parser.GTE, numTok(fmt.Sprint(lo))), cmp(identTok("id"), parser.LT, numTok(fmt.Sprint(hi))))
+}
+
+func TestRangeLookup_UsesTheIndexWhileHalfTheFileOrLess(t *testing.T) {
+	withCostFactor(t, 2)
+	table := wideKeys(t, sequence(0, 159))
+	pages := int(table.file.NumPages())
+	require.Greater(t, pages, 6, "the table must span several pages")
+	cf := countOn(table)
+	lookups, scans := 0, 0
+
+	for k := 1; k <= 160; k++ {
+		d := distinctPages(t, table, 0, k)
+		cf.reset() // distinctPages scanned through the wrapper
+		got := idsOf(t, table, idRange(0, k))
+
+		require.Len(t, got, k)
+		if 2*d <= pages {
+			lookups++
+			require.EqualValues(t, 0, cf.scans.Load(), "k=%d d=%d pages=%d should be a lookup", k, d, pages)
+			require.EqualValues(t, d, cf.pageReads.Load(), "k=%d reads each page once", k)
+			require.EqualValues(t, k, cf.gets.Load(), "k=%d", k)
+		} else {
+			scans++
+			require.EqualValues(t, 1, cf.scans.Load(), "k=%d d=%d pages=%d should scan", k, d, pages)
+			require.EqualValues(t, 0, cf.pageReads.Load(), "k=%d", k)
+		}
+	}
+	assert.Greater(t, lookups, 0)
+	assert.Greater(t, scans, 0, "both sides of the boundary must be exercised")
+}
+
+func TestRangeLookup_ManyRowsOnFewPagesIsALookup(t *testing.T) {
+	withCostFactor(t, 2)
+	table := wideKeys(t, sequence(0, 1599))
+	pages := int(table.file.NumPages())
+	d := distinctPages(t, table, 0, 300)
+	require.LessOrEqual(t, 2*d, pages, "the setup must satisfy the rule")
 	cf := countOn(table)
 
-	t.Run("exactly the cap is a lookup", func(t *testing.T) {
-		got := idsOf(t, table, andExpr(cmp(identTok("id"), parser.GTE, numTok("0")), cmp(identTok("id"), parser.LT, numTok("100"))))
+	got := idsOf(t, table, idRange(0, 300))
 
-		assert.Len(t, got, 100)
-		assert.EqualValues(t, 0, cf.scans.Load())
-		assert.EqualValues(t, 100, cf.gets.Load())
-	})
-	t.Run("one more row scans", func(t *testing.T) {
-		cf.scans.Store(0)
-		cf.gets.Store(0)
+	assert.Len(t, got, 300, "more rows than the old cap of 100")
+	assert.EqualValues(t, 0, cf.scans.Load())
+	assert.EqualValues(t, 1, cf.getManyCalls.Load())
+	assert.EqualValues(t, d, cf.pageReads.Load())
+}
 
-		got := idsOf(t, table, andExpr(cmp(identTok("id"), parser.GTE, numTok("0")), cmp(identTok("id"), parser.LTE, numTok("100"))))
+func TestRangeLookup_FewRowsSpreadOverMostPagesScan(t *testing.T) {
+	withCostFactor(t, 2)
+	// Ids 0..9 are placed a page apart, so a range of ten rows touches ten of
+	// the file's pages: the old cap served it, a scan is cheaper.
+	order := make([]int, 160)
+	for r := 0; r < 10; r++ {
+		for c := 0; c < 16; c++ {
+			order[r*16+c] = c*10 + r
+		}
+	}
+	indexed, plain := wideKeys(t, order), wideKeys(t, order)
+	plain.noIndexes = true
+	pages := int(indexed.file.NumPages())
+	require.Greater(t, 2*distinctPages(t, indexed, 0, 10), pages, "the setup must break the rule")
+	cf := countOn(indexed)
 
-		assert.Len(t, got, 101, "the answer is the same")
-		assert.EqualValues(t, 1, cf.scans.Load())
-		assert.EqualValues(t, 0, cf.gets.Load())
-	})
+	got := idsOf(t, indexed, idRange(0, 10))
+
+	assert.Equal(t, idsOf(t, plain, idRange(0, 10)), got, "the same answer")
+	assert.EqualValues(t, 1, cf.scans.Load())
+	assert.EqualValues(t, 0, cf.getManyCalls.Load(), "a refused range reads no page")
+}
+
+func TestRangeLookup_AnEmptyRangeAndAnEmptyFileReadNothing(t *testing.T) {
+	withCostFactor(t, 2)
+	table := wideKeys(t, sequence(0, 39))
+	cf := countOn(table)
+
+	assert.Empty(t, idsOf(t, table, idRange(50, 60)))
+	assert.EqualValues(t, 0, cf.scans.Load())
+	assert.EqualValues(t, 0, cf.getManyCalls.Load())
+
+	empty := keyedTable(t)
+	assert.Empty(t, idsOf(t, empty, idRange(0, 10)))
 }
 
 func TestRangeLookup_DeleteAndUpdateTouchOnlyTheRange(t *testing.T) {
@@ -395,6 +496,62 @@ func TestRangeLookup_AStaleEntryFallsBackToTheScan(t *testing.T) {
 
 	assert.Equal(t, [][]string{{"2"}, {"4"}}, got)
 	assert.Nil(t, table.builtIndexes(), "the wrong index is discarded")
+}
+
+// With the real factor and wide rows some random ranges are lookups and some
+// scan; either way the answers and the file must match an unindexed table, also
+// after UPDATEs have moved rows.
+func TestRangeLookup_MatchesTheScanOnWideRowsWithTheRealFactor(t *testing.T) {
+	withCostFactor(t, 2)
+	rng := rand.New(rand.NewSource(11))
+	order := rng.Perm(320)
+	indexed, plain := wideKeys(t, order), wideKeys(t, order)
+	plain.noIndexes = true
+	cf := countOn(indexed)
+	ops := []parser.TokenType{parser.LT, parser.LTE, parser.GT, parser.GTE}
+
+	for step := 0; step < 300; step++ {
+		lo, width := rng.Intn(320), 1+rng.Intn(60)
+		where := andExpr(
+			cmp(identTok("id"), ops[2+rng.Intn(2)], numTok(fmt.Sprint(lo))),
+			cmp(identTok("id"), ops[rng.Intn(2)], numTok(fmt.Sprint(lo+width))))
+		if rng.Intn(5) == 0 {
+			assign := []parser.Assignment{{Column: "pad", Value: strTok(strings.Repeat("y", 1000))}}
+			require.NoError(t, indexed.Update(assign, where))
+			require.NoError(t, plain.Update(assign, where))
+			require.Equal(t, fileRows(t, plain), fileRows(t, indexed), "step %d", step)
+			continue
+		}
+		require.Equal(t, idsOf(t, plain, where), idsOf(t, indexed, where), "step %d", step)
+	}
+	assertIndexesMatchHeap(t, indexed)
+	assert.Greater(t, cf.scans.Load(), int64(0), "some ranges must have scanned")
+	assert.Greater(t, cf.getManyCalls.Load(), int64(0), "and some must have been lookups")
+}
+
+func TestRangeCostFactor_ShipsAsTwo(t *testing.T) {
+	assert.Equal(t, 2, shippedRangeCostFactor)
+}
+
+// A refused range must stop walking the tree as soon as it is known to be too
+// big, not after visiting every key: here the first 51 pages already break the
+// rule on a 100-page file, so the walk must not reach the 10,000th key.
+func TestCollectRangeIDs_StopsWalkingOnceTheRangeIsTooBig(t *testing.T) {
+	withCostFactor(t, 2)
+	tree, err := index.New(index.DefaultNodeBytes)
+	require.NoError(t, err)
+	for i := 0; i < 10000; i++ {
+		require.NoError(t, tree.Insert(keyOf(t, int64(i)), storage.RowID{Page: int32(i / 10), Slot: i % 10}))
+	}
+
+	ids, ok := collectRangeIDs(tree, rangePlan{}, 100)
+
+	assert.False(t, ok)
+	assert.Less(t, len(ids), 600, "stopped soon after the 51st page, not at the end")
+
+	ids, ok = collectRangeIDs(tree, rangePlan{}, 2000)
+	assert.True(t, ok)
+	assert.Len(t, ids, 10000, "a range within the rule is walked in full")
 }
 
 // The same claim as above across many pages: rows of a few KB put about five on
