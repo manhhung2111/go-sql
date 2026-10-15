@@ -124,7 +124,7 @@ Ranges on a secondary tree, with `V` the value part of the literal and `F` the e
 
 ### Long values
 
-A secondary entry is `value part + 8` bytes and must not exceed the tree's `MaxKeyLen`. `INSERT`, `UPDATE` and `ADD COLUMN` on a table with an index on a column reject a value whose entry would be too long with `key too long for index %q: %d bytes exceeds the maximum of %d`, writing nothing, as they do for PRIMARY KEY/UNIQUE strings (the check is on the encoded size, which is up to twice the string for strings full of zero bytes).
+A secondary entry is `value part + 8` bytes and must not exceed the tree's `MaxKeyLen`. `INSERT` and `UPDATE` on a table with an index on a column reject a value whose entry would be too long with `key too long for index %q: %d bytes exceeds the maximum of %d`, writing nothing, as they do for PRIMARY KEY/UNIQUE strings (the check is on the encoded size, which is up to twice the string for strings full of zero bytes). `ADD COLUMN` needs no check, because a new column cannot have an index yet.
 
 A value already in the file when the index is created may be too long. The build then degrades that one index: its tree is nil and statements on that column scan, exactly like a degraded unique column. Nothing fails. Rows with `NULL` in the column are not indexed, as before.
 
@@ -180,7 +180,7 @@ Pure Go with `testify`, `go test -race ./...`. Every test is seen failing first.
 - **Fewer reads:** with a duplicate-rich column indexed, an equality `SELECT`, `UPDATE` and `DELETE` do no `Scan` and read each page of the matches once; an equality on a column where the matches lie on more than half the pages scans; a second unindexed column still scans.
 - **Same answers, errors and order as the scan:** the seeded differential test (indexed against `noIndexes`) gains a table with a secondary index on a duplicate-rich column and equality, range and mixed `WHERE`s on it, with INSERTs, UPDATEs that move rows and DELETEs, comparing results, errors and the file after every statement; also with the factor at 0 and at a huge value.
 - **Maintenance:** after each kind of write every tree agrees with a fresh build (`assertIndexesMatchHeap` extended to secondary trees); an injected `Insert`, `Sync` or `Delete` failure discards them.
-- **Long values:** an over-long value in an indexed column is rejected on `INSERT`/`UPDATE`/`ADD COLUMN`; one written before the index existed degrades only that index and results still match the scan.
+- **Long values:** an over-long value in an indexed column is rejected on `INSERT`/`UPDATE`; one written before the index existed degrades only that index and results still match the scan.
 - **Mutation checks**, each confirmed to fail a test: sort entries without the `RowID` suffix; use the raw string bytes as the value part; upper bound `V‖0x00` instead of `V‖F‖0x00`; skip the secondary update after an UPDATE (re-point only on key change); skip the removal on DELETE; keep the trees across `CREATE INDEX`; keep a dangling index row at load; drop the table row before the new index rows in `RENAME TO`.
 - A one-off measurement on a 100,000-row table (not committed), quoted in the PR: an equality `SELECT` on a duplicate-rich non-key column, before and after the index, and one where the rule refuses.
 - `go test -race ./...`, `go vet ./...` and `gofmt -l .` stay clean.
