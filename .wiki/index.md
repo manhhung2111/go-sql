@@ -16,7 +16,7 @@ Read this first. Conventions are in [SCHEMA.md](SCHEMA.md); the ingest history a
 - [internal/parser](code/parser.md): lexer, recursive-descent parser, AST
 - [internal/engine](code/engine.md): execution engine, catalog, codecs
 - [internal/engine/table.go](code/engine-table.md): the table implementation (largest file)
-- [internal/index](code/index.md): order-preserving key codec and in-memory B+ tree
+- [internal/index](code/index.md): key codecs, in-memory B+ tree, on-disk snapshot
 - [internal/storage](code/storage.md): heap files and pages
 - [internal/grpcserver](code/grpcserver.md): the ParseQuery RPC
 - [internal/wiring](code/wiring.md): Wire injector and providers
@@ -26,11 +26,11 @@ Read this first. Conventions are in [SCHEMA.md](SCHEMA.md); the ingest history a
 
 ## Concepts
 
-- [Lock order](concepts/lock-order.md): Catalog, Database, Table, then catalogStore
+- [Lock order](concepts/lock-order.md): Catalog, Database, Table, tableIndexes, then catalogStore
 - [Validate everything, then write](concepts/validate-then-write.md): bad statements write nothing
 - [Literal coercion happens only in the engine](concepts/literal-coercion.md): parser keeps raw tokens
 - [AST sum types and type-switch dispatch](concepts/ast-sum-types.md): empty interfaces, external switches
-- [Full-table scans until an index exists](concepts/full-table-scans.md): cost model of every lookup
+- [Point and range lookups via indexes, full-table scans as fallback](concepts/full-table-scans.md): when a WHERE uses an index and when it scans
 - [Peek before advance in the parser](concepts/peek-before-advance.md): the parser's token rule
 
 ## Decisions
@@ -43,5 +43,6 @@ Read this first. Conventions are in [SCHEMA.md](SCHEMA.md); the ingest history a
 - [Schemas are stored as JSON with stable string tags](decisions/schema-json-stable-tags.md): never the parser's enum values
 - [UPDATE inserts new row versions before tombstoning the old ones](decisions/update-inserts-before-tombstone.md): a crash can duplicate, not lose
 - [Orphan files are removed by id, never by directory name](decisions/orphan-removal-by-file-id.md): safe on case-insensitive filesystems
+- [The index snapshot is removed before the first heap write](decisions/snapshot-removed-before-first-write.md): a crash never leaves a snapshot older than the heap
 - [Lexer and parser take the SQL per call](decisions/parser-takes-sql-per-call.md): lets Wire build singletons
 - [Parse and execution errors are returned in the response body](decisions/grpc-errors-in-response-body.md): never a transport-level error

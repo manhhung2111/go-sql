@@ -17,11 +17,11 @@ updated: 33c2c35
 
 ## Rule
 
-Primary key, unique, and secondary columns have in-memory B+ tree indexes that serve point equality lookups (`=`) and bounded range lookups (under the page-count rule: fetched rows lie on at most half of the file's pages). Unindexed queries, wide ranges, and non-equality/non-bounded conditions fall back to full-table scans.
+Primary key and unique columns, and columns with a `CREATE INDEX`, have in-memory B+ tree indexes. A WHERE that is an AND chain of column-against-literal comparisons that cannot fail on any row can be served from them: `=` on a PRIMARY KEY/UNIQUE column always is; any bounded range on those columns, and `=` or a range on an indexed column (which may hold duplicates), is served when the rows lie on at most half of the file's pages (the page-count rule). A PRIMARY KEY/UNIQUE column always uses its own tree, never a CREATE INDEX on it. Anything else (OR, two columns, a literal that does not coerce, NULL, `!=`) scans, so WHERE errors are exactly what the scan reports.
 
 ## Why it matters
 
-Point and range lookups bypass full-table scans, reducing latency from milliseconds to microseconds on large tables. Scans remain the robust fallback for unindexed queries and range scans spanning most of the table.
+A lookup reads only the pages that hold matching rows. In one measurement (100,000 rows) an equality on a clustered indexed column went from a 10.6 ms scan to 26 µs, while values spread over every page stayed at the scan's cost because the rule refuses them. A lookup also trusts the index: an entry that points at a missing row discards the trees (and any snapshot) and falls back to the scan.
 
 ## Where it applies
 

@@ -27,8 +27,8 @@ Standard library only. It never imports `internal/parser` or `internal/engine`.
 
 | File | Responsibility |
 | --- | --- |
-| `page.go` | `Page` interface and slotted page: `NewPage`, `DecodePage`, `InsertRow`, `Row`, `DeleteRow`, `SlotCount`, `PageNumber`, `Encode`; constants `maxPageSize`, `MaxRowSize`, `PageSize`, `PageHeaderSize` |
-| `pagefile.go` | `PageFile` interface (`ReadPage`, `WritePage`, `AllocatePage`, `NumPages`, `Sync`, `Close`), `CreatePageFile`, `OpenPageFile`: verifies and stamps format-neutral headers (checksum and page number) |
+| `page.go` | `Page` interface and slotted page: `NewPage`, `DecodePage`, `InsertRow`, `Row`, `DeleteRow`, `SlotCount`, `PageNumber`, `Encode`; constants `maxPageSize` and `MaxRowSize` |
+| `pagefile.go` | `PageFile` interface (`ReadPage`, `WritePage`, `AllocatePage`, `NumPages`, `Sync`, `Close`), `CreatePageFile`, `OpenPageFile`: verifies and stamps format-neutral headers (checksum and page number); exported `PageSize` (16384) and `PageHeaderSize` (8, the page file's own header, which an owner's layout starts after) |
 | `pagecache.go` | `NewCachedPageFile`: per-file, write-through LRU cache with immutable buffers |
 | `file.go` | `File` interface built on top of `PageFile`, `CreateFile`, `OpenFile`, `RowID{Page, Slot}`, `Row`; `Insert`, `Delete`, `Get`, `GetMany`, `NumPages`, `Scan`, `Sync`, `Close` |
 | `dir.go` | `SyncDir`: fsync a directory so created entries survive a power loss |
@@ -46,12 +46,12 @@ Standard library only. It never imports `internal/parser` or `internal/engine`.
 
 ## Called by / calls
 
-Called by `internal/engine` (`SqlTable`, `catalogStore`, index snapshots). Calls only the OS.
+Called by `internal/engine` (`SqlTable`, `catalogStore`) and `internal/index` (the snapshot file is a `PageFile`; `internal/index` imports `internal/storage`, never the reverse). Calls only the OS.
 
 ## Gotchas
 
 - `Insert` and `Delete` write the page straight through without fsync; the caller calls `Sync` once per statement.
-- `GetMany` assumes IDs may not be sorted and groups/reads pages efficiently, but callers should provide sorted IDs when possible.
+- `GetMany` reads each run of *consecutive* ids on one page once, so ids sorted by page and slot cost one page read per page; unsorted ids read a page again each time it comes back. The engine sorts them. It returns every row or an error wrapping `ErrRowNotFound`.
 - Deletes tombstone a slot and space is never reclaimed.
 
 ## Related

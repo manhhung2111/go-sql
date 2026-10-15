@@ -3,7 +3,9 @@ title: internal/parser
 kind: code
 sources:
   - internal/parser/
-updated: 09d8ab0
+  - docs/specs/2026-10-15-create-index-design.md
+  - pr: 43
+updated: 33c2c35
 ---
 # internal/parser
 
@@ -20,9 +22,9 @@ Standard library plus `github.com/google/wire` (only in `wireset.go`). It never 
 | File | Responsibility |
 | --- | --- |
 | `lexer.go` | `Lexer` interface, `NewLexer`, `Lexing(sql) []Token`; scans numbers, quoted strings, identifiers, symbols |
-| `token.go` | `TokenType` constants, reserved-word map, `Token{Type, Value, Position}` |
+| `token.go` | `TokenType` constants, reserved-word map (including `INDEX` and `ON`), `Token{Type, Value, Position}` |
 | `parser.go` | `Parser` interface, `NewParser`, `Parse`: dispatch on the first token, then `expectEnd` |
-| `parser_ddl.go` | CREATE/DROP DATABASE, SHOW DATABASES, CREATE/DROP/ALTER TABLE, column definitions and constraints |
+| `parser_ddl.go` | CREATE/DROP DATABASE, SHOW DATABASES, CREATE/DROP/ALTER TABLE, `CREATE INDEX [IF NOT EXISTS] name ON table (column)`, `DROP INDEX [IF EXISTS] name ON table`, column definitions and constraints |
 | `parser_dml.go` | SELECT, INSERT INTO, UPDATE, DELETE |
 | `expression.go` | WHERE grammar: OR over AND over comparison; `BinaryExpression`, `ComparisonExpression` |
 | `ast_ddl.go`, `ast_dml.go` | Statement structs and `ColumnDefinition` (with `IsPrimaryKey`, `IsNotNull`, `IsUnique`, `RequiresValue`, `DefaultValue`) |
@@ -33,7 +35,7 @@ Standard library plus `github.com/google/wire` (only in `wireset.go`). It never 
 
 - `Parser.Parse(sql string) (SqlStatement, error)` in `parser.go`: the only entry point the rest of the repo uses.
 - `SqlStatement`, `DataType`, `Constraint`, `AlterAction` and `Expression` are all empty interfaces; see [AST sum types](../concepts/ast-sum-types.md).
-- Statement structs: `CreateDatabaseStatement`, `DropDatabaseStatement`, `ShowDatabasesStatement`, `CreateTableStatement`, `DropTableStatement`, `AlterTableStatement` (with `AddColumnAction`, `DropColumnAction`, `RenameColumnAction`, `RenameTableAction`), `SelectStatement`, `InsertIntoStatement`, `UpdateStatement`, `DeleteStatement`.
+- Statement structs: `CreateDatabaseStatement`, `DropDatabaseStatement`, `ShowDatabasesStatement`, `CreateTableStatement`, `DropTableStatement`, `CreateIndexStatement{Name, Table, Column, IfNotExists}`, `DropIndexStatement{Name, Table, IfExists}`, `AlterTableStatement` (with `AddColumnAction`, `DropColumnAction`, `RenameColumnAction`, `RenameTableAction`), `SelectStatement`, `InsertIntoStatement`, `UpdateStatement`, `DeleteStatement`.
 
 ## Called by / calls
 
@@ -43,6 +45,7 @@ Standard library plus `github.com/google/wire` (only in `wireset.go`). It never 
 
 - `sqlParser` stores `tokens` and `pos` on the struct and `sqlLexer` stores `runes` and `pos`; `Parse` and `Lexing` reset them on each call. The code has no locking, and `grpcserver.Server` holds a single parser instance, so concurrent `Parse` calls would share that state. See [SQL passed per call](../decisions/parser-takes-sql-per-call.md).
 - Literal values stay raw `Token`s; the engine coerces them. See [literal coercion](../concepts/literal-coercion.md).
+- `INDEX` and `ON` are reserved words since #43, so a column or table named `index` or `on` no longer parses. Only a single column, non-unique index is accepted; there is no `UNIQUE` or composite form.
 - `Lexing` has a `TODO: handle negative number` comment, so negative numeric literals are not handled.
 - `Parse` rejects tokens left after an optional trailing semicolon (`expectEnd`).
 - Parser code must `peek()` and check a token's type before `advance()`; see [peek before advance](../concepts/peek-before-advance.md).

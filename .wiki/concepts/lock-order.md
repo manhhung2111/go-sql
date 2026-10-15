@@ -23,7 +23,7 @@ Reaching into a nested level's data without going through its owning type's lock
 ## Where it applies
 
 - `SqlCatalog` (`catalog.go`), `SqlDatabase` (`database.go`) and `SqlTable` (`table.go`) each have an `mu sync.RWMutex`.
-- `tableIndexes` has its own `mu sync.RWMutex` (leaf).
+- `tableIndexes` has its own `mu sync.Mutex` (leaf), held while the trees are built, loaded from a snapshot, or discarded.
 - `catalogStore` (`catalogstore.go`) has `mu sync.Mutex`.
 - A scan takes the table's read lock, so scans of one table may run concurrently; mutations take its write lock.
 

@@ -34,8 +34,9 @@ The engine executes parsed statements against a hierarchy that mirrors SQL: `Cat
 ## Index wiring and lookups
 
 - **Uniqueness checks**: PRIMARY KEY and UNIQUE constraints are checked via in-memory B+ tree lookups instead of full table scans.
-- **Point and range lookups**: `SELECT`, `UPDATE`, and `DELETE` whose WHERE clause pins or bounds a key column (`=`, `<`, `<=`, `>`, `>=`) execute via index lookups (`lookupRows`). Bounded range lookups follow the page-count rule (`rangeCostFactor` = 2): rows must lie on at most half of the file's pages. Otherwise, execution falls back to a full-table scan.
-- **Persistence**: Clean shutdown saves index trees to `<file_id>.idx` snapshots, which are loaded on restart.
+- **Point and range lookups**: `SELECT`, `UPDATE`, and `DELETE` whose WHERE clause pins or bounds a PRIMARY KEY/UNIQUE column, or a column with a `CREATE INDEX` (`=`, `<`, `<=`, `>`, `>=`), execute via index lookups (`lookupRows`). `=` on a PRIMARY KEY/UNIQUE column always does; every range, and `=` on an indexed column, follows the page-count rule (`rangeCostFactor` = 2): rows must lie on at most half of the file's pages. Otherwise, execution falls back to a full-table scan: [scans and lookups](../concepts/full-table-scans.md).
+- **CREATE INDEX**: `CREATE INDEX name ON table (column)` records a non-unique, single-column definition in `sys_indexes` ([catalog persistence](catalog-persistence.md)); the tree is built later, in the same scan as the others.
+- **Persistence**: a clean shutdown saves the trees to `<file_id>.idx`, and the first use after a restart loads them instead of scanning the heap. The first heap write after open removes the snapshot before writing, so a crash never leaves one older than the heap: [snapshot removal](../decisions/snapshot-removed-before-first-write.md).
 
 ## Properties to keep in mind
 

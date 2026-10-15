@@ -19,7 +19,7 @@ The storage layer is a standalone heap-file library that knows only bytes. The e
 
 ## Layout
 
-A heap file is a sequence of 16KiB pages. Each page has a 12-byte header (checksum, page number, slot count, data start), a slot array growing forward, and row data growing backward from the end. A row is addressed by `RowID{Page, Slot}`. Heap files are built on top of `PageFile`. Index trees are persisted alongside heap files as `<file_id>.idx` snapshots.
+A heap file is a sequence of 16KiB pages. Each page has a 12-byte header (checksum, page number, slot count, data start), a slot array growing forward, and row data growing backward from the end. A row is addressed by `RowID{Page, Slot}`. Heap files are built on top of `PageFile`, whose own 8-byte header (checksum and page number) is separate from the slotted page's 12 bytes. An index snapshot is also a `PageFile`, with a different layout: see [internal/index](../code/index.md).
 
 ## Write path
 
