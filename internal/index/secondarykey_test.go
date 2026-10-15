@@ -112,3 +112,27 @@ func TestEncodeSecondaryKey_RejectsANegativeRowID(t *testing.T) {
 	_, err = EncodeSecondaryKey(int64(1), storage.RowID{Page: 0, Slot: -1})
 	assert.Error(t, err)
 }
+
+func TestSecondaryKeyLen(t *testing.T) {
+	tests := []struct {
+		v    any
+		want int
+	}{
+		{int64(7), 16},
+		{true, 9},
+		{"", 10},
+		{"a", 11},
+		{"a\x00", 13}, // the zero byte is escaped to two
+	}
+	for _, tc := range tests {
+		got, err := SecondaryKeyLen(tc.v)
+
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, got)
+		key, err := EncodeSecondaryKey(tc.v, storage.RowID{})
+		require.NoError(t, err)
+		assert.Equal(t, len(key), got, "it is the length of the key")
+	}
+	_, err := SecondaryKeyLen(nil)
+	assert.Error(t, err)
+}

@@ -80,3 +80,13 @@ func SecondaryEqualRange(v any) (lo, hi []byte, err error) {
 	hi = append(hi, 0x00)
 	return part, hi, nil
 }
+
+// SecondaryKeyLen returns the length of the secondary key for v: the value part
+// plus the row id. A string with zero bytes is longer than its Go length.
+func SecondaryKeyLen(v any) (int, error) {
+	part, err := valuePart(v)
+	if err != nil {
+		return 0, err
+	}
+	return len(part) + secondaryRowIDSize, nil
+}

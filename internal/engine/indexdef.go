@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 
+	"manhhung2111/go-sql/internal/index"
 	"manhhung2111/go-sql/internal/parser"
 )
 
@@ -61,5 +62,36 @@ func (t *SqlTable) DropIndex(name string, ifExists bool) error {
 	}
 	t.indexDefs = slices.Delete(slices.Clone(t.indexDefs), at, at+1)
 	t.dropIndexes()
+	return nil
+}
+
+// checkSecondaryLengths rejects a value whose secondary key would not fit the
+// tree: the value part and the row id must fit in maxKeyLen. It applies to
+// indexed columns only.
+func (t *SqlTable) checkSecondaryLengths(rows [][]any) error {
+	for i, col := range t.secondaryColumns() {
+		if col < 0 {
+			continue
+		}
+		for _, row := range rows {
+			if row[col] == nil {
+				continue
+			}
+			if err := t.checkSecondaryValue(t.indexDefs[i].name, row[col]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (t *SqlTable) checkSecondaryValue(indexName string, value any) error {
+	n, err := index.SecondaryKeyLen(value)
+	if err != nil {
+		return err
+	}
+	if n > maxKeyLen {
+		return fmt.Errorf("key too long for index %q: %d bytes exceeds the maximum of %d", indexName, n, maxKeyLen)
+	}
 	return nil
 }
