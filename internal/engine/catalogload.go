@@ -15,6 +15,7 @@ type loadedTable struct {
 	columns []parser.ColumnDefinition
 	path    string
 	file    storage.File
+	indexes []indexDef
 }
 
 type loadedCatalog struct {
@@ -136,6 +137,52 @@ func (s *catalogStore) load() (*loadedCatalog, error) {
 		loaded.databases[record.database] = append(loaded.databases[record.database], loadedTable{
 			name: record.name, fileID: record.fileID, columns: columns, path: path, file: file,
 		})
+	}
+	// Index definitions. A row is valid if its table survived and has the
+	// column; the others, and repeats of a valid (db, table, name), are stale.
+	columnsOf := map[tableKey]map[string]bool{}
+	for _, sv := range all {
+		if sv.dead {
+			continue
+		}
+		columns, _ := DecodeSchema(sv.record.schema) // already decoded successfully above
+		names := map[string]bool{}
+		for _, c := range columns {
+			names[c.Name] = true
+		}
+		columnsOf[tableKey{sv.record.database, sv.record.name}] = names
+	}
+	defs := map[tableKey][]indexDef{}
+	seen := map[indexKey]bool{}
+	var staleIndexes []storage.RowID
+	for row, err := range s.indexes.Scan() {
+		if err != nil {
+			closeAll()
+			return nil, fmt.Errorf("reading sys_indexes: %w", err)
+		}
+		record, err := decodeIndexRecord(row.Bytes)
+		if err != nil {
+			closeAll()
+			return nil, err
+		}
+		tk := tableKey{record.database, record.table}
+		key := indexKey{record.database, record.table, record.name}
+		if !columnsOf[tk][record.column] || seen[key] {
+			staleIndexes = append(staleIndexes, row.ID)
+			continue
+		}
+		seen[key] = true
+		s.indexRows[key] = row.ID
+		defs[tk] = append(defs[tk], indexDef{name: record.name, column: record.column})
+	}
+	if err := tombstoneAll(s.indexes, staleIndexes); err != nil {
+		closeAll()
+		return nil, err
+	}
+	for db, tables := range loaded.databases {
+		for i := range tables {
+			tables[i].indexes = defs[tableKey{db, tables[i].name}]
+		}
 	}
 	return loaded, nil
 }

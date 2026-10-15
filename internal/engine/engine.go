@@ -126,6 +126,34 @@ func (e *SqlEngine) Execute(statement parser.SqlStatement, dbName string) (Respo
 
 		return Response{}, nil
 
+	case parser.CreateIndexStatement:
+		database, err := e.resolveDatabase(dbName)
+		if err != nil {
+			return Response{}, err
+		}
+		table, err := resolveTable(database, stmt.Table)
+		if err != nil {
+			return Response{}, err
+		}
+		if err := table.CreateIndex(stmt.Name, stmt.Column, stmt.IfNotExists); err != nil {
+			return Response{}, err
+		}
+		return Response{}, nil
+
+	case parser.DropIndexStatement:
+		database, err := e.resolveDatabase(dbName)
+		if err != nil {
+			return Response{}, err
+		}
+		table, err := resolveTable(database, stmt.Table)
+		if err != nil {
+			return Response{}, err
+		}
+		if err := table.DropIndex(stmt.Name, stmt.IfExists); err != nil {
+			return Response{}, err
+		}
+		return Response{}, nil
+
 	case parser.SelectStatement:
 		database, err := e.resolveDatabase(dbName)
 		if err != nil {

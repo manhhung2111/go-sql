@@ -50,16 +50,20 @@ func (s *sqlParser) Parse(sqlStatement string) (SqlStatement, error) {
 			stmt, err = s.parseCreateDatabaseStatement()
 		} else if s.expect(TABLE) {
 			stmt, err = s.parseCreateTableStatement()
+		} else if s.expect(INDEX) {
+			stmt, err = s.parseCreateIndexStatement()
 		} else {
-			return nil, fmt.Errorf("DATABASE keyword must be expected after CREATE, got %s", s.peek().Value)
+			return nil, fmt.Errorf("DATABASE, TABLE or INDEX keyword must be expected after CREATE, got %s", s.peek().Value)
 		}
 	case DROP:
 		if s.expect(DATABASE) {
 			stmt, err = s.parseDropDatabaseStatement()
 		} else if s.expect(TABLE) {
 			stmt, err = s.parseDropTableStatement()
+		} else if s.expect(INDEX) {
+			stmt, err = s.parseDropIndexStatement()
 		} else {
-			return nil, fmt.Errorf("DATABASE or TABLE keyword must be expected after DROP, got %s", s.peek().Value)
+			return nil, fmt.Errorf("DATABASE, TABLE or INDEX keyword must be expected after DROP, got %s", s.peek().Value)
 		}
 	case SHOW:
 		if !s.expect(DATABASES) {

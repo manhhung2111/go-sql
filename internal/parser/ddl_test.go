@@ -16,7 +16,7 @@ func TestParse_CreateDatabase(t *testing.T) {
 func TestParse_CreateMissingDatabaseKeyword(t *testing.T) {
 	_, err := parse(t, "CREATE mydb")
 
-	assert.EqualError(t, err, "DATABASE keyword must be expected after CREATE, got mydb")
+	assert.EqualError(t, err, "DATABASE, TABLE or INDEX keyword must be expected after CREATE, got mydb")
 }
 
 func TestParse_CreateNonIdentDatabase(t *testing.T) {
@@ -35,7 +35,7 @@ func TestParse_DropDatabase(t *testing.T) {
 func TestParse_DropMissingDatabaseOrTableKeyword(t *testing.T) {
 	_, err := parse(t, "DROP mydb")
 
-	assert.EqualError(t, err, "DATABASE or TABLE keyword must be expected after DROP, got mydb")
+	assert.EqualError(t, err, "DATABASE, TABLE or INDEX keyword must be expected after DROP, got mydb")
 }
 
 func TestParse_DropNonIdentDatabase(t *testing.T) {

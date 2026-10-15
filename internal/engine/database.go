@@ -60,7 +60,7 @@ func newLoadedDatabase(name string, store *catalogStore, tables []loadedTable) D
 		d.Table[lt.name] = &SqlTable{
 			Name: lt.name, Columns: lt.columns,
 			path: lt.path, file: lt.file, fileID: lt.fileID,
-			store: store, database: name,
+			store: store, database: name, indexDefs: lt.indexes,
 		}
 	}
 	return d
@@ -141,8 +141,14 @@ func (d *SqlDatabase) DropTable(name string, ifExists bool) error {
 		return fmt.Errorf("dropping table %q: %w", name, err)
 	}
 	delete(d.Table, name)
-	if err := table.Drop(); err != nil {
-		return fmt.Errorf("table %q dropped, but removing its file failed: %w", name, err)
+	dropErr := table.Drop()
+	// The table is closed now, so no CreateIndex on a handle fetched earlier can
+	// add a row after this. A row that cannot be removed stays in the store and
+	// is swept when a table of this name is created or renamed to, and dropped at
+	// startup.
+	_ = d.store.removeTableIndexes(d.Name, name)
+	if dropErr != nil {
+		return fmt.Errorf("table %q dropped, but removing its file failed: %w", name, dropErr)
 	}
 	return nil
 }
