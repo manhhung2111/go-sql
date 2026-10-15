@@ -64,13 +64,13 @@ func entries(tree *index.Tree) []string {
 // what a fresh build from the heap would.
 func assertIndexesMatchHeap(t *testing.T, table *SqlTable) {
 	t.Helper()
-	got := table.builtIndexes()
+	got := table.builtSet()
 	require.NotNil(t, got, "the indexes must be built")
 	want, err := table.buildIndexes()
 	require.NoError(t, err)
-	require.Len(t, got, len(want))
-	for col, wantTree := range want {
-		gotTree, ok := got[col]
+	require.Len(t, got.unique, len(want.unique))
+	for col, wantTree := range want.unique {
+		gotTree, ok := got.unique[col]
 		require.True(t, ok, "column %d has no entry", col)
 		if wantTree == nil {
 			assert.Nil(t, gotTree, "column %d cannot be indexed", col)
@@ -78,6 +78,17 @@ func assertIndexesMatchHeap(t *testing.T, table *SqlTable) {
 		}
 		require.NotNil(t, gotTree, "column %d lost its tree", col)
 		assert.Equal(t, entries(wantTree), entries(gotTree), "column %d", col)
+	}
+	require.Len(t, got.secondary, len(want.secondary))
+	for name, wantTree := range want.secondary {
+		gotTree, ok := got.secondary[name]
+		require.True(t, ok, "index %q has no entry", name)
+		if wantTree == nil {
+			assert.Nil(t, gotTree, "index %q cannot hold the table's values", name)
+			continue
+		}
+		require.NotNil(t, gotTree, "index %q lost its tree", name)
+		assert.Equal(t, entries(wantTree), entries(gotTree), "index %q", name)
 	}
 }
 

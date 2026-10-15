@@ -17,11 +17,14 @@ type lookupPlan struct {
 	value  any
 }
 
-// rangePlan is a half-open range of encoded keys on one key column, as
-// Tree.Range takes it. A nil lo or hi is unbounded.
+// rangePlan is a half-open range of encoded keys on one column, as Tree.Range
+// takes it. A nil lo or hi is unbounded. secondary names the CREATE INDEX whose
+// tree the range is over; it is empty for a PRIMARY KEY/UNIQUE column's own
+// tree.
 type rangePlan struct {
-	column int
-	lo, hi []byte
+	column    int
+	secondary string
+	lo, hi    []byte
 }
 
 // lookupPlans is what a WHERE offers an index: the keys it pins with an
@@ -56,6 +59,7 @@ func (t *SqlTable) planLookup(where parser.Expression, columnIndex map[string]in
 			return lookupPlans{}
 		}
 		if !t.isKeyColumn(column) {
+			t.planSecondary(&plans, column, op, value)
 			continue
 		}
 		switch op {
@@ -72,11 +76,64 @@ func (t *SqlTable) planLookup(where parser.Expression, columnIndex map[string]in
 	return plans
 }
 
+// planSecondary adds what "column op value" offers the first CREATE INDEX on
+// column, if there is one. Every entry of a value ends in its row id, so an
+// equality is the range that holds all of the value's entries, and the bounds
+// of an ordering operator are the ends of that range.
+func (t *SqlTable) planSecondary(plans *lookupPlans, column int, op parser.TokenType, value any) {
+	def, ok := t.secondaryFor(column)
+	if !ok {
+		return
+	}
+	lo, hi, err := index.SecondaryEqualRange(value)
+	if err != nil {
+		return
+	}
+	switch op {
+	case parser.EQ:
+		plans.addSecondaryBounds(column, def.name, lo, hi)
+	case parser.GTE:
+		plans.addSecondaryBounds(column, def.name, lo, nil)
+	case parser.GT:
+		plans.addSecondaryBounds(column, def.name, hi, nil)
+	case parser.LT:
+		plans.addSecondaryBounds(column, def.name, nil, lo)
+	case parser.LTE:
+		plans.addSecondaryBounds(column, def.name, nil, hi)
+	}
+}
+
+// addSecondaryBounds tightens the range over the named index with a lower and
+// an upper bound; nil leaves that side alone.
+func (p *lookupPlans) addSecondaryBounds(column int, name string, lower, upper []byte) {
+	i := slices.IndexFunc(p.ranges, func(r rangePlan) bool { return r.column == column && r.secondary == name })
+	if i < 0 {
+		p.ranges = append(p.ranges, rangePlan{column: column, secondary: name})
+		i = len(p.ranges) - 1
+	}
+	r := &p.ranges[i]
+	if lower != nil {
+		r.lo = tighterLower(r.lo, lower)
+	}
+	if upper != nil {
+		r.hi = tighterUpper(r.hi, upper)
+	}
+}
+
+// secondaryFor returns the first CREATE INDEX on column.
+func (t *SqlTable) secondaryFor(column int) (indexDef, bool) {
+	at := slices.IndexFunc(t.indexDefs, func(d indexDef) bool { return d.column == t.Columns[column].Name })
+	if at < 0 {
+		return indexDef{}, false
+	}
+	return t.indexDefs[at], true
+}
+
 // addBound tightens the range on column with "column op key". The key that
 // comes right after key in byte order is key followed by a zero byte, for the
 // fixed-width integer encodings and for strings alike, so > and <= use that.
 func (p *lookupPlans) addBound(column int, op parser.TokenType, key []byte) {
-	i := slices.IndexFunc(p.ranges, func(r rangePlan) bool { return r.column == column })
+	i := slices.IndexFunc(p.ranges, func(r rangePlan) bool { return r.column == column && r.secondary == "" })
 	if i < 0 {
 		p.ranges = append(p.ranges, rangePlan{column: column})
 		i = len(p.ranges) - 1
@@ -191,8 +248,9 @@ var rangeCostFactor = 2
 // lookupRows serves where from an index when it can. usable is false when the
 // statement must scan instead; otherwise rows holds the rows that satisfy
 // where, in file order (the scan's order). A key pinned with = yields at most
-// one row; a bounded range yields its rows when they lie on few enough pages
-// (see rangeCostFactor). needTrees are columns that must have a tree for a
+// one row; a bounded range on a PRIMARY KEY/UNIQUE column or on a column with a
+// CREATE INDEX yields its rows when they lie on few enough pages (see
+// rangeCostFactor). needTrees are columns that must have a tree for a
 // lookup to be enough (an UPDATE's assigned unique columns). It may build the
 // indexes, or discard them if one disagrees with the file. Callers hold t.mu.
 func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]int, needTrees []int) (rows []fetchedRow, usable bool, err error) {
@@ -200,10 +258,11 @@ func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]in
 	if len(plans.equalities) == 0 && len(plans.ranges) == 0 {
 		return nil, false, nil
 	}
-	trees, err := t.indexes()
+	set, err := t.indexSet()
 	if err != nil {
 		return nil, false, err
 	}
+	trees := set.unique
 	for _, column := range needTrees {
 		if trees[column] == nil {
 			return nil, false, nil
@@ -237,9 +296,19 @@ func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]in
 		}
 		return []fetchedRow{{id: id, row: row}}, true, nil
 	}
+	// A range on a unique tree is preferred; then one on a secondary tree.
 	for _, plan := range plans.ranges {
-		if tree := trees[plan.column]; tree != nil {
-			return t.rangeRows(tree, plan, where, columnIndex)
+		if plan.secondary == "" {
+			if tree := trees[plan.column]; tree != nil {
+				return t.rangeRows(tree, plan, where, columnIndex)
+			}
+		}
+	}
+	for _, plan := range plans.ranges {
+		if plan.secondary != "" {
+			if tree := set.secondary[plan.secondary]; tree != nil {
+				return t.rangeRows(tree, plan, where, columnIndex)
+			}
 		}
 	}
 	return nil, false, nil

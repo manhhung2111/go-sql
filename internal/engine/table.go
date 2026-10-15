@@ -240,6 +240,9 @@ func (t *SqlTable) InsertValues(columns []string, values [][]parser.Token) error
 	if err := t.checkUniqueness(newRows, uniqueColumns); err != nil {
 		return err
 	}
+	if err := t.checkSecondaryLengths(newRows); err != nil {
+		return err
+	}
 	if rowErr != nil {
 		return rowErr
 	}
@@ -814,8 +817,8 @@ func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[strin
 
 	// Only the key values of the matching rows are kept, and only if there is
 	// an index to update.
-	trackKeys := t.builtIndexes() != nil
-	keyCols := t.keyColumns()
+	trackKeys := t.builtSet() != nil
+	keyCols := t.trackedColumns()
 	var matched []storage.RowID
 	var keys [][]any
 	if usable {
@@ -857,7 +860,7 @@ func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[strin
 		t.dropIndexes()
 		return err
 	}
-	t.indexDeleted(keys)
+	t.indexDeleted(keys, matched)
 	return nil
 }
 
@@ -939,8 +942,8 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 	}
 	// If the indexes are built, remember each matched row's old key values so
 	// they can be removed after the write.
-	trackKeys := t.builtIndexes() != nil
-	keyCols := t.keyColumns()
+	trackKeys := t.builtSet() != nil
+	keyCols := t.trackedColumns()
 
 	var oldIDs []storage.RowID
 	var oldKeys [][]any
@@ -996,6 +999,13 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 	if len(updated) > 0 {
 		// An UPDATE that matches no row stores nothing, so only now is a long
 		// value a problem.
+		for i, col := range t.secondaryColumns() {
+			if col >= 0 && assigned[col] != nil {
+				if err := t.checkSecondaryValue(t.indexDefs[i].name, assigned[col]); err != nil {
+					return err
+				}
+			}
+		}
 		for _, idx := range uniqueColumns {
 			if err := checkKeyLength(t.Columns[idx].Name, assigned[idx]); err != nil {
 				return err
@@ -1047,7 +1057,7 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 		t.dropIndexes()
 		return err
 	}
-	t.indexMoved(oldKeys, updated, newIDs)
+	t.indexMoved(oldKeys, oldIDs, updated, newIDs)
 	return nil
 }
 
