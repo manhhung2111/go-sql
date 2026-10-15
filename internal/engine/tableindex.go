@@ -84,9 +84,12 @@ func (t *SqlTable) indexSet() (*treeSet, error) {
 	if t.file == nil {
 		return nil, fmt.Errorf("table %q is closed", t.Name)
 	}
-	set, err := t.buildIndexes()
-	if err != nil {
-		return nil, err
+	set := t.loadSnapshot()
+	if set == nil {
+		var err error
+		if set, err = t.buildIndexes(); err != nil {
+			return nil, err
+		}
 	}
 	t.idx.set, t.idx.fileID = set, t.fileID
 	return set, nil

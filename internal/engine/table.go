@@ -54,6 +54,12 @@ type SqlTable struct {
 
 	// indexDefs are the CREATE INDEX definitions of the table, guarded by mu.
 	indexDefs []indexDef
+
+	// snapshotMayExist is true for a table opened from the catalog: its
+	// <id>.idx may exist and be read. Any heap write removes the file first
+	// and clears this (see prepareHeapWrite). A table created in this run, or
+	// given a new file by ALTER, never has one: ids are not reused.
+	snapshotMayExist bool
 }
 
 // Rules when for a table schema:
@@ -1095,6 +1101,7 @@ func (t *SqlTable) Rename(name string) error {
 func (t *SqlTable) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.saveSnapshot()
 	return t.closeLocked()
 }
 

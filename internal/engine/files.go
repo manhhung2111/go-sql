@@ -45,7 +45,7 @@ func newFileAllocator(dataDir DataDir) (*fileAllocator, error) {
 	return a, nil
 }
 
-// maxTableFileID returns the highest <id>.tbl id found in any database
+// maxTableFileID returns the highest <id> of a table file or leftover snapshot found in any database
 // directory under root, or 0 if there are none. Anything that does not look
 // like a table file is ignored.
 func maxTableFileID(root string) (int64, error) {
@@ -68,11 +68,7 @@ func maxTableFileID(root string) (int64, error) {
 			return 0, fmt.Errorf("scanning database directory %q: %w", dir, err)
 		}
 		for _, file := range files {
-			name, isTableFile := strings.CutSuffix(file.Name(), tableFileExt)
-			if !isTableFile {
-				continue
-			}
-			if id, err := strconv.ParseInt(name, 10, 64); err == nil && id > maxID {
+			if id, ok := fileIDOf(file.Name()); ok && id > maxID {
 				maxID = id
 			}
 		}
@@ -121,4 +117,24 @@ func validateDatabaseName(name string) error {
 		return fmt.Errorf("invalid database name %q", name)
 	}
 	return nil
+}
+
+const (
+	snapshotExt    = ".idx"
+	snapshotTmpExt = ".idx.tmp"
+)
+
+// fileIDOf returns the id in the name of a file the engine creates for a table:
+// <id>.tbl, <id>.idx or <id>.idx.tmp. Anything else is not ours.
+func fileIDOf(name string) (int64, bool) {
+	for _, ext := range []string{tableFileExt, snapshotTmpExt, snapshotExt} {
+		if text, ok := strings.CutSuffix(name, ext); ok {
+			id, err := strconv.ParseInt(text, 10, 64)
+			if err != nil || id < 0 {
+				return 0, false
+			}
+			return id, true
+		}
+	}
+	return 0, false
 }
