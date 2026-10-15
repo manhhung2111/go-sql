@@ -77,3 +77,16 @@ func (c ColumnDefinition) DefaultValue() (Token, bool) {
 	}
 	return Token{}, false
 }
+
+type CreateIndexStatement struct {
+	Name        string
+	Table       string
+	Column      string
+	IfNotExists bool
+}
+
+type DropIndexStatement struct {
+	Name     string
+	Table    string
+	IfExists bool
+}

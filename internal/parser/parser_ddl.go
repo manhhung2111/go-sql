@@ -328,3 +328,80 @@ func applyDataTypeSize(dataType DataType, size int) (DataType, error) {
 		return nil, fmt.Errorf("%T does not accept a size argument", dataType)
 	}
 }
+
+// "CREATE" "INDEX" ("IF" "NOT" "EXISTS")? index_name "ON" table_name "(" column_name ")"
+func (s *sqlParser) parseCreateIndexStatement() (CreateIndexStatement, error) {
+	stmt := CreateIndexStatement{}
+
+	if s.expect(IF) {
+		if !s.expect(NOT) {
+			return CreateIndexStatement{}, fmt.Errorf("expected NOT after IF, got %s", s.peek().Value)
+		}
+		if !s.expect(EXISTS) {
+			return CreateIndexStatement{}, fmt.Errorf("expected EXISTS after IF NOT, got %s", s.peek().Value)
+		}
+		stmt.IfNotExists = true
+	}
+
+	name := s.advance()
+	if name.Type != IDENT {
+		return CreateIndexStatement{}, fmt.Errorf("expected index name, got %s", name.Value)
+	}
+	stmt.Name = name.Value
+
+	if !s.expect(ON) {
+		return CreateIndexStatement{}, fmt.Errorf("expected ON after index name, got %s", s.peek().Value)
+	}
+
+	table := s.advance()
+	if table.Type != IDENT {
+		return CreateIndexStatement{}, fmt.Errorf("expected table name, got %s", table.Value)
+	}
+	stmt.Table = table.Value
+
+	if !s.expect(LPAREN) {
+		return CreateIndexStatement{}, fmt.Errorf("expected ( after table name, got %s", s.peek().Value)
+	}
+	column := s.advance()
+	if column.Type != IDENT {
+		return CreateIndexStatement{}, fmt.Errorf("expected column name, got %s", column.Value)
+	}
+	stmt.Column = column.Value
+
+	if s.peek().Type == COMMA {
+		return CreateIndexStatement{}, fmt.Errorf("composite indexes are not supported")
+	}
+	if !s.expect(RPAREN) {
+		return CreateIndexStatement{}, fmt.Errorf("expected ) after column name, got %s", s.peek().Value)
+	}
+	return stmt, nil
+}
+
+// "DROP" "INDEX" ("IF" "EXISTS")? index_name "ON" table_name
+func (s *sqlParser) parseDropIndexStatement() (DropIndexStatement, error) {
+	stmt := DropIndexStatement{}
+
+	if s.expect(IF) {
+		if !s.expect(EXISTS) {
+			return DropIndexStatement{}, fmt.Errorf("expected EXISTS after IF, got %s", s.peek().Value)
+		}
+		stmt.IfExists = true
+	}
+
+	name := s.advance()
+	if name.Type != IDENT {
+		return DropIndexStatement{}, fmt.Errorf("expected index name, got %s", name.Value)
+	}
+	stmt.Name = name.Value
+
+	if !s.expect(ON) {
+		return DropIndexStatement{}, fmt.Errorf("expected ON after index name, got %s", s.peek().Value)
+	}
+
+	table := s.advance()
+	if table.Type != IDENT {
+		return DropIndexStatement{}, fmt.Errorf("expected table name, got %s", table.Value)
+	}
+	stmt.Table = table.Value
+	return stmt, nil
+}
