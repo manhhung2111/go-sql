@@ -31,7 +31,7 @@ What makes this hard is not the file format but trust. A saved tree may be used 
 
 | Page | Content |
 | --- | --- |
-| 0 | Header: magic, format version, the heap's `NumPages()` at save time, the number of trees, then one descriptor per tree |
+| 0 | Header: magic, format version, the heap's file id and `NumPages()` at save time, the number of trees, then one descriptor per tree |
 | 1.. | Entry pages, the trees one after another in descriptor order |
 
 A tree descriptor holds:
@@ -50,11 +50,11 @@ A table loads its snapshot instead of scanning only if all of these hold, checke
 
 1. The file opens as a page file and every page read verifies.
 2. Magic and format version are known.
-3. The heap page count in the header equals the heap's `NumPages()` now.
+3. The heap file id and page count in the header equal the heap's file id and `NumPages()` now. (File ids are never reused, so a snapshot can never be read against another table's heap even if one is left behind.)
 4. The set of trees in the header equals, exactly, the set the table has now: the same PRIMARY KEY/UNIQUE columns (schema index and name) and the same CREATE INDEX definitions (name and column).
 5. For every tree, the entries are strictly increasing in key order and their number equals the descriptor's count.
 
-The page count is a cheap sanity check against a file copied from somewhere else; it is not what makes the snapshot sound. That is the next section.
+The id and page count are cheap sanity checks against a file copied or left behind; they are not what makes the snapshot sound. That is the next section.
 
 ### Making a stale snapshot impossible
 
@@ -74,13 +74,14 @@ What this does not defend against is something other than this process changing 
 - **CREATE INDEX / DROP INDEX.** The trees are already discarded; the snapshot is removed too, since its tree set no longer matches. (Check 4 would reject it anyway; removing it avoids leaving a file known to be useless.)
 - **DROP TABLE** removes the `.idx` and `.idx.tmp` with the heap. **RENAME TABLE** needs nothing. **RENAME COLUMN** needs nothing: a snapshot saved before the rename fails check 4 and is rebuilt; one saved after it has the new names.
 - **ADD / DROP COLUMN** orphan the old snapshot as described above.
-- **Startup cleanup.** `removeOrphans` and `maxTableFileID` learn two more names, `<number>.idx` and `<number>.idx.tmp`, with the existing rules: decided by id, never recursively, only files named by a number and that suffix. An `.idx` whose id no table references is removed with its heap. A directory counts as empty only when these are gone too.
+- **Startup cleanup.** `removeOrphans` and `maxTableFileID` learn two more names, `<number>.idx` and `<number>.idx.tmp`, with the existing rules: decided by id, never recursively, only files named by a number and that suffix. `maxTableFileID` counts them too, so the allocator never hands out the id of a leftover snapshot. An `.idx` whose id no table references is removed with its heap. A directory counts as empty only when these are gone too.
 
 ## Error handling
 
 - Failing to read a snapshot is never an error to the user: remove the file, scan.
 - A failure to save is swallowed.
 - A failure to remove a snapshot before a heap write is returned to the user, and nothing is written.
+- A snapshot that fails to load is removed, but the table still remembers that one may exist, so its first heap write still removes the file and fsyncs the directory: the failed load's own removal is not durable.
 - Snapshot code never returns a wrong tree: a corrupt page, a mismatched header or an out-of-order entry all end in the scan path.
 
 ## Out of scope (YAGNI)
