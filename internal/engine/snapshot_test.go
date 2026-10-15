@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"manhhung2111/go-sql/internal/index"
 	"manhhung2111/go-sql/internal/parser"
 )
 
@@ -526,19 +527,77 @@ func TestSnapshot_NothingIsSavedAfterAHeapWriteFailed(t *testing.T) {
 }
 
 func TestSnapshot_AStaleEntryRemovesTheSnapshotAndTheTreesAreRebuilt(t *testing.T) {
-	c, e, path, _ := savedEvents(t)
-	table := tableOf(t, c, "shop", "events")
-	set, err := table.indexSet()
-	require.NoError(t, err)
-	ids := idsOfName(t, set.secondary["by_kind"], "k3")
-	require.NoError(t, table.file.Delete(ids[0])) // behind the index's back
-	require.NoError(t, table.file.Sync())
+	for _, tc := range []struct {
+		name         string
+		removalFails bool
+	}{
+		{"the snapshot is removed", false},
+		{"the removal fails, so the snapshot must not be loaded again", true},
+	} {
+		// A range on a secondary tree reads its rows with GetMany; an equality
+		// on a key reads one row with Get. Both detect a stale entry.
+		t.Run("range/"+tc.name, func(t *testing.T) {
+			c, e, path, _ := savedEvents(t)
+			table := tableOf(t, c, "shop", "events")
+			set, err := table.indexSet()
+			require.NoError(t, err)
+			ids := idsOfName(t, set.secondary["by_kind"], "k3")
+			require.NoError(t, table.file.Delete(ids[0])) // behind the index's back
+			require.NoError(t, table.file.Sync())
+			failRemoval(t, tc.removalFails)
 
-	assert.Len(t, mustExec(t, e, "shop", kindQuery).Rows, 5, "the scan's answer")
+			assert.Len(t, mustExec(t, e, "shop", kindQuery).Rows, 5, "the scan's answer")
 
-	assert.NoFileExists(t, path, "a snapshot that led to a wrong entry is not kept")
-	cf := countOn(table)
-	assert.Len(t, mustExec(t, e, "shop", kindQuery).Rows, 5)
-	assert.EqualValues(t, 1, cf.scans.Load(), "the trees were rebuilt from the heap, not reloaded")
-	assertIndexesMatchHeap(t, table)
+			if !tc.removalFails {
+				assert.NoFileExists(t, path, "a snapshot that led to a wrong entry is not kept")
+			}
+			cf := countOn(table)
+			assert.Len(t, mustExec(t, e, "shop", kindQuery).Rows, 5)
+			assert.EqualValues(t, 1, cf.scans.Load(), "the trees were rebuilt from the heap, not reloaded")
+			assertIndexesMatchHeap(t, table)
+		})
+		t.Run("equality/"+tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			c := newTestCatalogAt(t, dir)
+			e := NewEngine(c)
+			mustExec(t, e, "", "CREATE DATABASE shop")
+			mustExec(t, e, "shop", "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(20))")
+			for i := 0; i < 10; i++ {
+				mustExec(t, e, "shop", fmt.Sprintf("INSERT INTO users (id, name) VALUES (%d, 'n%d')", i, i))
+			}
+			mustExec(t, e, "shop", "SELECT name FROM users WHERE id = 1")
+			path := tableOf(t, c, "shop", "users").snapshotPath()
+			c, e = restart(t, dir, c)
+			table := tableOf(t, c, "shop", "users")
+			set, err := table.indexSet()
+			require.NoError(t, err)
+			key, err := index.EncodeKey(int64(4))
+			require.NoError(t, err)
+			id, ok := set.unique[0].Get(key)
+			require.True(t, ok)
+			require.NoError(t, table.file.Delete(id))
+			require.NoError(t, table.file.Sync())
+			failRemoval(t, tc.removalFails)
+
+			assert.Empty(t, mustExec(t, e, "shop", "SELECT name FROM users WHERE id = 4").Rows)
+
+			if !tc.removalFails {
+				assert.NoFileExists(t, path)
+			}
+			cf := countOn(table)
+			assert.Empty(t, mustExec(t, e, "shop", "SELECT name FROM users WHERE id = 4").Rows)
+			assert.EqualValues(t, 1, cf.scans.Load(), "rebuilt from the heap")
+			assertIndexesMatchHeap(t, table)
+		})
+	}
+}
+
+func failRemoval(t *testing.T, fail bool) {
+	t.Helper()
+	if !fail {
+		return
+	}
+	old := removeSnapshotFile
+	removeSnapshotFile = func(string) error { return errInjected }
+	t.Cleanup(func() { removeSnapshotFile = old })
 }
