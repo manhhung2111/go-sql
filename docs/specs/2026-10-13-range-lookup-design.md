@@ -33,7 +33,7 @@ Three facts shape the design:
 - **An equality on a key column still wins.** If the `WHERE` pins any key column with `=`, part B's point lookup is used and the ranges are only re-checked as part of the whole `WHERE`.
 - **NULLs need no handling.** NULLs are never indexed, and the scan never matches a NULL under a comparison, so the tree's range is already right.
 - **Rows are fetched in file order.** The `RowID`s from the walk are sorted by (page, slot), then fetched and decoded one by one, and the whole `WHERE` is evaluated on each, exactly as for a point lookup. The result and the order of `UPDATE`'s new versions are therefore the same as the scan's.
-- **Give up on big ranges.** The walk collects at most `maxRangeRows` row ids (a package variable, 100). If it meets one more, the lookup reports not usable and the statement scans. A walk that gives up costs at most that many tree steps. A hundred page reads is a fraction of a scan of any table large enough to matter; tuning the number against a benchmark is future work and a one-line change.
+- **Give up on big ranges.** The walk collects at most `maxRangeRows` row ids (a package variable, 100). If it meets one more, the lookup reports not usable and the statement scans. A walk that gives up costs at most that many tree steps. A hundred page reads is a fraction of a scan of any table large enough to matter; tuning the number against a benchmark is future work and a one-line change. The fixed cap was replaced by a comparison of pages; see [the page-count rule](2026-10-14-page-count-range-rule-design.md).
 - **A degraded column (no tree) is never range-planned**, as with equality. `UPDATE` keeps part B's rule that every assigned unique column needs a tree.
 - **No maintenance changes.** Range lookups only read. Writes keep the indexes exactly as before.
 
@@ -63,7 +63,7 @@ Walking the AND chain, every comparison is validated as in part B. A comparison 
 
 `lookupRows` keeps its signature and result type. After the equality plans (unchanged), it tries range plans in order, using the first whose column has a tree:
 
-1. Walk `trees[column].Range(lo, hi)`, collecting row ids. If more than `maxRangeRows` arrive, report not usable (the statement scans). Keys that arrive are not needed; only the ids.
+1. Walk `trees[column].Range(lo, hi)`, collecting row ids. If more than `maxRangeRows` arrive, report not usable (the statement scans). Keys that arrive are not needed; only the ids. The fixed cap was replaced by a comparison of pages; see [the page-count rule](2026-10-14-page-count-range-rule-design.md).
 2. Sort the ids by (page, slot).
 3. For each id in order: `File.Get`, `DecodeRow`, evaluate the whole `WHERE`, keep the row if it matches. `ErrRowNotFound` discards the indexes and reports not usable, as for a point lookup; another error is returned.
 4. Return the matching rows in file order.

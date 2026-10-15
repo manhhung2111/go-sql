@@ -146,12 +146,11 @@ func TestIndexedTableMatchesAnUnindexedOne(t *testing.T) {
 	}
 }
 
-// With the cap lowered to two rows most ranges are too big and scan: the
-// answers must not change.
-func TestIndexedTableMatchesWhenRangesExceedTheCap(t *testing.T) {
-	saved := maxRangeRows
-	maxRangeRows = 2
-	t.Cleanup(func() { maxRangeRows = saved })
+// With the factor so high that every non-empty range is too expensive, all
+// ranges scan: the answers must not change. (The rest of the package runs with
+// every range a lookup; see TestMain.)
+func TestIndexedTableMatchesWhenEveryRangeScans(t *testing.T) {
+	withCostFactor(t, 1_000_000)
 	for seed := int64(7); seed <= 8; seed++ {
 		compareWithUnindexed(t, seed)
 	}
