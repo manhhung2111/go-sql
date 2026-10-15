@@ -51,7 +51,7 @@ A table loads its snapshot instead of scanning only if all of these hold, checke
 1. The file opens as a page file and every page read verifies.
 2. Magic and format version are known.
 3. The heap file id and page count in the header equal the heap's file id and `NumPages()` now. (File ids are never reused, so a snapshot can never be read against another table's heap even if one is left behind.)
-4. The set of trees in the header equals, exactly, the set the table has now: the same PRIMARY KEY/UNIQUE columns (schema index and name) and the same CREATE INDEX definitions (name and column).
+4. The set of trees in the header equals, exactly, the set the table has now: the same PRIMARY KEY/UNIQUE columns (schema index and name) and the same CREATE INDEX definitions (name and column). A CREATE INDEX tree also carries its column's schema index, because two columns can swap names and a tree of the old column must not load as the tree of the new one.
 5. For every tree, the entries are strictly increasing in key order and their number equals the descriptor's count.
 
 The id and page count are cheap sanity checks against a file copied or left behind; they are not what makes the snapshot sound. That is the next section.
@@ -64,6 +64,8 @@ A snapshot is sound if no heap write happened between the save and the load. Two
 - If the unlink or the directory fsync fails, the statement fails before writing anything. Writing the heap with a snapshot that might survive a crash would be the one way to corrupt an index silently.
 - A clean `Close` writes a new snapshot to `<file_id>.idx.tmp`, fsyncs it, renames it over `<file_id>.idx`, and fsyncs the directory. The file is therefore absent or complete. It saves only if the trees are built (otherwise there is nothing newer than what is on disk, and the file on disk is still valid unless a mutation removed it).
 - Crash after a heap write and before the next `Close`: no snapshot exists (it was removed before the write). Crash during the save: the final name is either the previous snapshot or absent; only a `.tmp` is left, which is removed by the next save or by orphan cleanup.
+
+- **After a heap write or fsync fails, or an index entry leads to a row that is not there, this run neither loads nor saves a snapshot** (and removes the one on disk, best effort). The trees would then be rebuilt from the page cache, which can hold bytes that never reached the disk, and a snapshot of that would pass every check against a heap that has lost them. The next start rebuilds from the heap, as before snapshots. A new heap file (ALTER) clears this.
 
 What this does not defend against is something other than this process changing a heap file between runs. That is not a threat model the heap has either.
 
