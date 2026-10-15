@@ -3,7 +3,8 @@ title: Parser subsystem
 kind: subsystem
 sources:
   - internal/parser/
-updated: 09d8ab0
+  - pr: 43
+updated: 33c2c35
 ---
 # Parser subsystem
 
@@ -12,7 +13,7 @@ The parser is the bottom layer: `internal/parser` turns a SQL string into an AST
 ## How a statement is parsed
 
 1. `Lexer.Lexing(sql)` scans runes into `Token`s (numbers, single- or double-quoted strings, identifiers and reserved words, symbols) and appends an `EOF` token.
-2. `Parser.Parse(sql)` reads the first token and dispatches: SELECT, INSERT INTO, UPDATE, DELETE FROM, CREATE DATABASE or TABLE, DROP DATABASE or TABLE, SHOW DATABASES, ALTER TABLE. Anything else returns `command not implemented`.
+2. `Parser.Parse(sql)` reads the first token and dispatches: SELECT, INSERT INTO, UPDATE, DELETE FROM, CREATE DATABASE, TABLE or INDEX, DROP DATABASE, TABLE or INDEX, SHOW DATABASES, ALTER TABLE. Anything else returns `command not implemented`.
 3. The matching `parse*Statement` function builds a statement struct. WHERE clauses are `OR` over `AND` over comparison with operators `=`, `!=`, `<`, `<=`, `>`, `>=` and operands that are identifiers, numbers or strings.
 4. `expectEnd` consumes an optional trailing semicolon and rejects any further tokens.
 
