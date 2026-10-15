@@ -27,6 +27,12 @@ type tableIndexes struct {
 	// the column or index cannot hold the file's values (see buildIndexes) and
 	// its statements scan the file instead.
 	set *treeSet
+	// distrust is set once the heap may not be what the trees (or a snapshot)
+	// were built from: a write or fsync failed, or an entry led to a row that
+	// is not there. From then on no snapshot is loaded or saved in this run,
+	// because a snapshot would record the page cache, which may hold bytes that
+	// never reached the disk. It is cleared when the table gets a new file.
+	distrust bool
 }
 
 // treeSet is the trees of one table: unique maps a PRIMARY KEY/UNIQUE column's
@@ -84,9 +90,12 @@ func (t *SqlTable) indexSet() (*treeSet, error) {
 	if t.file == nil {
 		return nil, fmt.Errorf("table %q is closed", t.Name)
 	}
-	set, err := t.buildIndexes()
-	if err != nil {
-		return nil, err
+	set := t.loadSnapshot()
+	if set == nil {
+		var err error
+		if set, err = t.buildIndexes(); err != nil {
+			return nil, err
+		}
 	}
 	t.idx.set, t.idx.fileID = set, t.fileID
 	return set, nil
@@ -131,6 +140,18 @@ func (t *SqlTable) dropIndexes() {
 	t.idx.mu.Lock()
 	defer t.idx.mu.Unlock()
 	t.idx.set = nil
+}
+
+// distrustIndexes discards the trees like dropIndexes and also stops this run
+// from loading or saving a snapshot of the file (see tableIndexes.distrust); any
+// snapshot on disk is removed, and the first heap write still makes that
+// durable.
+func (t *SqlTable) distrustIndexes() {
+	t.idx.mu.Lock()
+	t.idx.set = nil
+	t.idx.distrust = true
+	t.idx.mu.Unlock()
+	t.discardSnapshotFiles(t.path)
 }
 
 // secondaryColumns returns the schema index of each CREATE INDEX definition's

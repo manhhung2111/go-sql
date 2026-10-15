@@ -54,6 +54,12 @@ type SqlTable struct {
 
 	// indexDefs are the CREATE INDEX definitions of the table, guarded by mu.
 	indexDefs []indexDef
+
+	// snapshotMayExist is true for a table opened from the catalog: its
+	// <id>.idx may exist and be read. Any heap write removes the file first
+	// and clears this (see prepareHeapWrite). A table created in this run, or
+	// given a new file by ALTER, never has one: ids are not reused.
+	snapshotMayExist bool
 }
 
 // Rules when for a table schema:
@@ -390,18 +396,23 @@ func (t *SqlTable) appendToFile(rows [][]any) error {
 	if err != nil {
 		return err
 	}
+	if len(encoded) > 0 {
+		if err := t.prepareHeapWrite(); err != nil {
+			return err
+		}
+	}
 
 	ids := make([]storage.RowID, 0, len(encoded))
 	for _, b := range encoded {
 		id, err := t.file.Insert(b)
 		if err != nil {
-			t.dropIndexes()
+			t.distrustIndexes()
 			return err
 		}
 		ids = append(ids, id)
 	}
 	if err := t.file.Sync(); err != nil {
-		t.dropIndexes()
+		t.distrustIndexes()
 		return err
 	}
 	t.indexInserted(ids, rows)
@@ -528,6 +539,11 @@ func (t *SqlTable) adoptFile(tf tableFile) error {
 	closeErr := t.closeLocked()
 
 	t.file, t.path, t.fileID = tf.file, tf.path, tf.id
+	t.snapshotMayExist = false
+	t.discardSnapshotFiles(oldPath)
+	t.idx.mu.Lock()
+	t.idx.distrust = false
+	t.idx.mu.Unlock()
 
 	if err := os.Remove(oldPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return errors.Join(closeErr, fmt.Errorf("column change applied, but removing the old table file %q failed: %w", oldPath, err))
@@ -850,14 +866,19 @@ func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[strin
 		}
 	}
 
+	if len(matched) > 0 {
+		if err := t.prepareHeapWrite(); err != nil {
+			return err
+		}
+	}
 	for _, id := range matched {
 		if err := t.file.Delete(id); err != nil {
-			t.dropIndexes()
+			t.distrustIndexes()
 			return err
 		}
 	}
 	if err := t.file.Sync(); err != nil {
-		t.dropIndexes()
+		t.distrustIndexes()
 		return err
 	}
 	t.indexDeleted(keys, matched)
@@ -1038,23 +1059,28 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 	if err != nil {
 		return err
 	}
+	if len(encoded) > 0 {
+		if err := t.prepareHeapWrite(); err != nil {
+			return err
+		}
+	}
 	newIDs := make([]storage.RowID, 0, len(encoded))
 	for _, b := range encoded {
 		id, err := t.file.Insert(b)
 		if err != nil {
-			t.dropIndexes()
+			t.distrustIndexes()
 			return err
 		}
 		newIDs = append(newIDs, id)
 	}
 	for _, id := range oldIDs {
 		if err := t.file.Delete(id); err != nil {
-			t.dropIndexes()
+			t.distrustIndexes()
 			return err
 		}
 	}
 	if err := t.file.Sync(); err != nil {
-		t.dropIndexes()
+		t.distrustIndexes()
 		return err
 	}
 	t.indexMoved(oldKeys, oldIDs, updated, newIDs)
@@ -1095,6 +1121,7 @@ func (t *SqlTable) Rename(name string) error {
 func (t *SqlTable) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.saveSnapshot()
 	return t.closeLocked()
 }
 
@@ -1113,6 +1140,7 @@ func (t *SqlTable) Drop() error {
 	defer t.mu.Unlock()
 
 	closeErr := t.closeLocked()
+	t.discardSnapshotFiles(t.path)
 	if err := os.Remove(t.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return errors.Join(closeErr, fmt.Errorf("removing table file %q: %w", t.path, err))
 	}

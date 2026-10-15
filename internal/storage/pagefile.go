@@ -8,6 +8,14 @@ import (
 	"path/filepath"
 )
 
+const (
+	// PageSize is the size of every page of a PageFile.
+	PageSize = maxPageSize
+	// PageHeaderSize is the checksum and page number a PageFile stamps; the
+	// owner's layout starts after it.
+	PageHeaderSize = pageNumberPos + 4
+)
+
 // PageFile is a file of 16KiB pages addressed by page number. It verifies and
 // stamps only the format-neutral page header (checksum at 0:4, page number at
 // 4:8); everything after is the owner's to lay out.

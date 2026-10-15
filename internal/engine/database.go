@@ -60,7 +60,7 @@ func newLoadedDatabase(name string, store *catalogStore, tables []loadedTable) D
 		d.Table[lt.name] = &SqlTable{
 			Name: lt.name, Columns: lt.columns,
 			path: lt.path, file: lt.file, fileID: lt.fileID,
-			store: store, database: name, indexDefs: lt.indexes,
+			store: store, database: name, indexDefs: lt.indexes, snapshotMayExist: true,
 		}
 	}
 	return d

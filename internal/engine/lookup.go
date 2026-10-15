@@ -288,7 +288,7 @@ func (t *SqlTable) lookupRows(where parser.Expression, columnIndex map[string]in
 		if stale {
 			// The index points at a row that is not there: it is wrong, so
 			// drop it and let the caller scan.
-			t.dropIndexes()
+			t.distrustIndexes()
 			return nil, false, nil
 		}
 		if !matched {
@@ -356,7 +356,7 @@ func (t *SqlTable) rangeRows(tree *index.Tree, plan rangePlan, where parser.Expr
 
 	encoded, err := t.file.GetMany(ids)
 	if errors.Is(err, storage.ErrRowNotFound) {
-		t.dropIndexes()
+		t.distrustIndexes()
 		return nil, false, nil
 	}
 	if err != nil {

@@ -3,15 +3,14 @@ package engine
 import (
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 )
 
 // removeOrphans deletes what no surviving catalog row refers to. Ids are
 // global and never reused, so a table file is an orphan exactly when no
 // survivor has its id, whatever directory it sits in; a directory name is
 // never trusted, because on a case-insensitive filesystem two databases can
-// share one. Only files named <number>.tbl are removed, and a directory is
+// share one. Only files named <number>.tbl, <number>.idx or <number>.idx.tmp are
+// removed, and a directory is
 // removed only if it is empty and no database has its exact name, with a
 // non-recursive os.Remove: it can never take a file it did not create. A
 // removed directory that a database still needs is recreated by its next
@@ -39,9 +38,8 @@ func removeOrphans(files *fileAllocator, databases map[string]bool, referenced m
 				remaining++
 				continue
 			}
-			idText, isTable := strings.CutSuffix(child.Name(), tableFileExt)
-			id, parseErr := strconv.ParseInt(idText, 10, 64)
-			if !isTable || parseErr != nil || referenced[id] {
+			id, isOurs := fileIDOf(child.Name())
+			if !isOurs || referenced[id] {
 				remaining++
 				continue
 			}
