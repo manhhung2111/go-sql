@@ -52,16 +52,20 @@ type catalogStore struct {
 	tables    storage.File
 	dbRows    map[string]storage.RowID
 	tableRows map[tableKey]storage.RowID
+	indexes   storage.File
+	indexRows map[indexKey]storage.RowID
 	closed    bool
 }
 
-func newCatalogStore(files *fileAllocator, databases, tables storage.File) *catalogStore {
+func newCatalogStore(files *fileAllocator, databases, tables, indexes storage.File) *catalogStore {
 	return &catalogStore{
 		files:     files,
 		databases: databases,
 		tables:    tables,
+		indexes:   indexes,
 		dbRows:    make(map[string]storage.RowID),
 		tableRows: make(map[tableKey]storage.RowID),
+		indexRows: make(map[indexKey]storage.RowID),
 	}
 }
 
@@ -81,7 +85,13 @@ func openCatalogStore(files *fileAllocator) (*catalogStore, error) {
 		_ = databases.Close()
 		return nil, err
 	}
-	return newCatalogStore(files, databases, tables), nil
+	indexes, err := openOrCreate(filepath.Join(dir, sysIndexesFile))
+	if err != nil {
+		_ = databases.Close()
+		_ = tables.Close()
+		return nil, err
+	}
+	return newCatalogStore(files, databases, tables, indexes), nil
 }
 
 func openOrCreate(path string) (storage.File, error) {
@@ -95,7 +105,7 @@ func openOrCreate(path string) (storage.File, error) {
 	return storage.CreateFile(path)
 }
 
-// Close closes both files. It is idempotent.
+// Close closes the three system files. It is idempotent.
 func (s *catalogStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -103,7 +113,7 @@ func (s *catalogStore) Close() error {
 		return nil
 	}
 	s.closed = true
-	return errors.Join(s.databases.Close(), s.tables.Close())
+	return errors.Join(s.databases.Close(), s.tables.Close(), s.indexes.Close())
 }
 
 // encodeTableRow builds a sys_tables row. Callers do this before creating any
@@ -235,6 +245,7 @@ func (s *catalogStore) tombstoneTablesLocked(database string) error {
 			errs = append(errs, err)
 		}
 	}
+	errs = append(errs, s.tombstoneIndexRowsLocked(func(k indexKey) bool { return k.database == database }))
 	return errors.Join(errs...)
 }
 
@@ -242,6 +253,9 @@ func (s *catalogStore) addTable(database, name string, row []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := s.tombstoneIndexRowsLocked(func(k indexKey) bool { return k.database == database && k.table == name }); err != nil {
+		return err
+	}
 	id, err := insertSynced(s.tables, row)
 	if err != nil {
 		return err
@@ -292,4 +306,202 @@ func (s *catalogStore) replaceTable(database, oldName, newName string, newRow []
 	delete(s.tableRows, oldKey)
 	s.tableRows[tableKey{database, newName}] = newID
 	return nil
+}
+
+const sysIndexesFile = "sys_indexes.tbl"
+
+var sysIndexesColumns = []parser.ColumnDefinition{
+	{Name: "db", DataType: parser.TextDataType{}},
+	{Name: "tbl", DataType: parser.TextDataType{}},
+	{Name: "name", DataType: parser.TextDataType{}},
+	{Name: "col", DataType: parser.TextDataType{}},
+}
+
+type indexKey struct{ database, table, name string }
+
+// indexRecord is one decoded sys_indexes row.
+type indexRecord struct {
+	database, table, name, column string
+}
+
+func encodeIndexRow(r indexRecord) ([]byte, error) {
+	row, err := encodeRowChecked(sysIndexesColumns, []any{r.database, r.table, r.name, r.column})
+	if err != nil {
+		return nil, fmt.Errorf("index %q: %w", r.name, err)
+	}
+	return row, nil
+}
+
+func decodeIndexRecord(b []byte) (indexRecord, error) {
+	values, err := DecodeRow(sysIndexesColumns, b)
+	if err != nil {
+		return indexRecord{}, fmt.Errorf("decoding sys_indexes row: %w", err)
+	}
+	database, ok1 := values[0].(string)
+	table, ok2 := values[1].(string)
+	name, ok3 := values[2].(string)
+	column, ok4 := values[3].(string)
+	if !ok1 || !ok2 || !ok3 || !ok4 {
+		return indexRecord{}, errors.New("decoding sys_indexes row: a column is NULL")
+	}
+	return indexRecord{database, table, name, column}, nil
+}
+
+// addIndex makes a definition durable; the row is the commit point.
+func (s *catalogStore) addIndex(database, table, name, column string) error {
+	row, err := encodeIndexRow(indexRecord{database, table, name, column})
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, err := insertSynced(s.indexes, row)
+	if err != nil {
+		return err
+	}
+	s.indexRows[indexKey{database, table, name}] = id
+	return nil
+}
+
+func (s *catalogStore) removeIndex(database, table, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := indexKey{database, table, name}
+	id, ok := s.indexRows[key]
+	if !ok {
+		return fmt.Errorf("index %q has no catalog row", name)
+	}
+	if err := deleteSynced(s.indexes, id); err != nil {
+		return err
+	}
+	delete(s.indexRows, key)
+	return nil
+}
+
+// tombstoneIndexRowsLocked tombstones every known index row for which match is
+// true. A row whose tombstone fails stays in the map so a later sweep retries it.
+func (s *catalogStore) tombstoneIndexRowsLocked(match func(indexKey) bool) error {
+	var errs []error
+	removed := false
+	for key, id := range s.indexRows {
+		if !match(key) {
+			continue
+		}
+		if err := s.indexes.Delete(id); err != nil {
+			errs = append(errs, fmt.Errorf("index %q: %w", key.name, err))
+			continue
+		}
+		delete(s.indexRows, key)
+		removed = true
+	}
+	if removed {
+		if err := s.indexes.Sync(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// removeTableIndexes tombstones every index row of one table.
+func (s *catalogStore) removeTableIndexes(database, table string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tombstoneIndexRowsLocked(func(k indexKey) bool { return k.database == database && k.table == table })
+}
+
+// stagedIndexRows is the new copy of a table's index rows, written before the
+// table row changes. old holds the rows to tombstone once it has.
+type stagedIndexRows struct {
+	database, table, newTable string
+	old                       map[indexKey]storage.RowID
+	added                     map[indexKey]storage.RowID
+}
+
+// stageIndexRows writes copies of table's index rows under newTable, with each
+// column renamed by renames (a nil map renames none), and syncs them. The
+// originals stay until commitStaged. Rows left under newTable by an earlier,
+// dropped table are swept first, so they never attach to this one.
+func (s *catalogStore) stageIndexRows(database, table, newTable string, renames map[string]string) (*stagedIndexRows, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	staged := &stagedIndexRows{database: database, table: table, newTable: newTable,
+		old: map[indexKey]storage.RowID{}, added: map[indexKey]storage.RowID{}}
+	for key, id := range s.indexRows {
+		if key.database == database && key.table == table {
+			staged.old[key] = id
+		}
+	}
+	if len(staged.old) == 0 {
+		return staged, nil
+	}
+	if newTable != table {
+		if err := s.tombstoneIndexRowsLocked(func(k indexKey) bool { return k.database == database && k.table == newTable }); err != nil {
+			return nil, err
+		}
+	}
+	cleanup := func() {
+		for _, id := range staged.added {
+			_ = s.indexes.Delete(id)
+		}
+		_ = s.indexes.Sync()
+	}
+	for key, id := range staged.old {
+		b, err := s.indexes.Get(id)
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		record, err := decodeIndexRecord(b)
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		if renamed, ok := renames[record.column]; ok {
+			record.column = renamed
+		}
+		record.table = newTable
+		row, err := encodeIndexRow(record)
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		newID, err := s.indexes.Insert(row)
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		staged.added[indexKey{database, newTable, key.name}] = newID
+	}
+	if err := s.indexes.Sync(); err != nil {
+		cleanup()
+		return nil, err
+	}
+	return staged, nil
+}
+
+// commitStaged tombstones the originals and makes the copies the live rows. A
+// failed tombstone is ignored: the load-time check drops the stale row, because
+// the table row it was validated against has already changed.
+func (s *catalogStore) commitStaged(staged *stagedIndexRows) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, id := range staged.old {
+		_ = s.indexes.Delete(id)
+		delete(s.indexRows, key)
+	}
+	_ = s.indexes.Sync()
+	for key, id := range staged.added {
+		s.indexRows[key] = id
+	}
+}
+
+// abortStaged tombstones the copies; the originals are untouched.
+func (s *catalogStore) abortStaged(staged *stagedIndexRows) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range staged.added {
+		_ = s.indexes.Delete(id)
+	}
+	_ = s.indexes.Sync()
 }

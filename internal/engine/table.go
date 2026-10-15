@@ -47,6 +47,9 @@ type SqlTable struct {
 	// off so tests can compare behaviour with and without.
 	idx       tableIndexes
 	noIndexes bool
+
+	// indexDefs are the CREATE INDEX definitions of the table, guarded by mu.
+	indexDefs []indexDef
 }
 
 // Rules when for a table schema:
