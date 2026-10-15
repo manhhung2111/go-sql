@@ -487,3 +487,58 @@ func runSQL(t *testing.T, e Engine, sql string) (Response, error) {
 	require.NoError(t, err, sql)
 	return e.Execute(statement, "shop")
 }
+
+// Two columns can swap names, so a tree's column name does not say which column
+// it indexes. Here the unlink of the old snapshot fails, and the snapshot still
+// has to be rejected when an index of the same name and column name is created
+// on a different column.
+func TestSnapshot_ASwappedColumnNameIsNotTheSameIndex(t *testing.T) {
+	c, e, path, _ := savedEvents(t)
+	old := removeSnapshotFile
+	removeSnapshotFile = func(string) error { return errInjected }
+	t.Cleanup(func() { removeSnapshotFile = old })
+	mustExec(t, e, "shop", "DROP INDEX by_kind ON events")
+	mustExec(t, e, "shop", "ALTER TABLE events RENAME COLUMN kind TO tmp")
+	mustExec(t, e, "shop", "ALTER TABLE events RENAME COLUMN id TO kind")
+	mustExec(t, e, "shop", "ALTER TABLE events RENAME COLUMN tmp TO id")
+	mustExec(t, e, "shop", "CREATE INDEX by_kind ON events (kind)") // now the first column
+	removeSnapshotFile = old
+	require.FileExists(t, path, "the old snapshot survived the failed removals")
+	_ = c
+
+	rows := mustExec(t, e, "shop", "SELECT id FROM events WHERE kind = 3").Rows
+
+	assert.Equal(t, [][]string{{"k3"}}, rows)
+}
+
+func TestSnapshot_NothingIsSavedAfterAHeapWriteFailed(t *testing.T) {
+	c, e, path, dir := savedEvents(t)
+	table := tableOf(t, c, "shop", "events")
+	ff := &failingFile{File: table.file, failSyncs: true}
+	table.file = ff
+	require.Error(t, execError(t, e, "shop", "INSERT INTO events (id, kind) VALUES (100, 'k3')"))
+	ff.failSyncs = false
+	mustExec(t, e, "shop", kindQuery) // rebuilds the trees from a heap that may not be on disk
+
+	_, _ = restart(t, dir, c)
+
+	assert.NoFileExists(t, path)
+}
+
+func TestSnapshot_AStaleEntryRemovesTheSnapshotAndTheTreesAreRebuilt(t *testing.T) {
+	c, e, path, _ := savedEvents(t)
+	table := tableOf(t, c, "shop", "events")
+	set, err := table.indexSet()
+	require.NoError(t, err)
+	ids := idsOfName(t, set.secondary["by_kind"], "k3")
+	require.NoError(t, table.file.Delete(ids[0])) // behind the index's back
+	require.NoError(t, table.file.Sync())
+
+	assert.Len(t, mustExec(t, e, "shop", kindQuery).Rows, 5, "the scan's answer")
+
+	assert.NoFileExists(t, path, "a snapshot that led to a wrong entry is not kept")
+	cf := countOn(table)
+	assert.Len(t, mustExec(t, e, "shop", kindQuery).Rows, 5)
+	assert.EqualValues(t, 1, cf.scans.Load(), "the trees were rebuilt from the heap, not reloaded")
+	assertIndexesMatchHeap(t, table)
+}

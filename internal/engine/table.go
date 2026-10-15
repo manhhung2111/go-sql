@@ -406,13 +406,13 @@ func (t *SqlTable) appendToFile(rows [][]any) error {
 	for _, b := range encoded {
 		id, err := t.file.Insert(b)
 		if err != nil {
-			t.dropIndexes()
+			t.distrustIndexes()
 			return err
 		}
 		ids = append(ids, id)
 	}
 	if err := t.file.Sync(); err != nil {
-		t.dropIndexes()
+		t.distrustIndexes()
 		return err
 	}
 	t.indexInserted(ids, rows)
@@ -541,6 +541,9 @@ func (t *SqlTable) adoptFile(tf tableFile) error {
 	t.file, t.path, t.fileID = tf.file, tf.path, tf.id
 	t.snapshotMayExist = false
 	t.discardSnapshotFiles(oldPath)
+	t.idx.mu.Lock()
+	t.idx.distrust = false
+	t.idx.mu.Unlock()
 
 	if err := os.Remove(oldPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return errors.Join(closeErr, fmt.Errorf("column change applied, but removing the old table file %q failed: %w", oldPath, err))
@@ -870,12 +873,12 @@ func (t *SqlTable) deleteFromFile(where parser.Expression, columnIndex map[strin
 	}
 	for _, id := range matched {
 		if err := t.file.Delete(id); err != nil {
-			t.dropIndexes()
+			t.distrustIndexes()
 			return err
 		}
 	}
 	if err := t.file.Sync(); err != nil {
-		t.dropIndexes()
+		t.distrustIndexes()
 		return err
 	}
 	t.indexDeleted(keys, matched)
@@ -1065,19 +1068,19 @@ func (t *SqlTable) Update(assignments []parser.Assignment, where parser.Expressi
 	for _, b := range encoded {
 		id, err := t.file.Insert(b)
 		if err != nil {
-			t.dropIndexes()
+			t.distrustIndexes()
 			return err
 		}
 		newIDs = append(newIDs, id)
 	}
 	for _, id := range oldIDs {
 		if err := t.file.Delete(id); err != nil {
-			t.dropIndexes()
+			t.distrustIndexes()
 			return err
 		}
 	}
 	if err := t.file.Sync(); err != nil {
-		t.dropIndexes()
+		t.distrustIndexes()
 		return err
 	}
 	t.indexMoved(oldKeys, oldIDs, updated, newIDs)

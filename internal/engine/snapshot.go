@@ -6,9 +6,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"manhhung2111/go-sql/internal/index"
+	"manhhung2111/go-sql/internal/parser"
 	"manhhung2111/go-sql/internal/storage"
 )
 
@@ -33,7 +35,9 @@ func (t *SqlTable) treeIDs() []index.TreeID {
 		ids = append(ids, index.TreeID{Kind: index.UniqueTree, Ordinal: col, Column: t.Columns[col].Name})
 	}
 	for _, def := range t.indexDefs {
-		ids = append(ids, index.TreeID{Kind: index.SecondaryTree, Name: def.name, Column: def.column})
+		// The ordinal pins the column: two columns can swap names, and a tree
+		// of the old column must not load as the tree of the new one.
+		ids = append(ids, index.TreeID{Kind: index.SecondaryTree, Ordinal: max(slices.IndexFunc(t.Columns, func(c parser.ColumnDefinition) bool { return c.Name == def.column }), 0), Name: def.name, Column: def.column})
 	}
 	return ids
 }
@@ -44,7 +48,7 @@ func (t *SqlTable) treeIDs() []index.TreeID {
 // snapshot may exist, because this removal is not made durable; the first heap
 // write does that (see prepareHeapWrite). Callers hold t.mu.
 func (t *SqlTable) loadSnapshot() *treeSet {
-	if !t.snapshotMayExist || t.file == nil {
+	if !t.snapshotMayExist || t.file == nil || t.idx.distrust {
 		return nil
 	}
 	ids := t.treeIDs()
@@ -79,7 +83,7 @@ func (t *SqlTable) saveSnapshot() {
 	}
 	set := t.builtSet()
 	ids := t.treeIDs()
-	if set == nil || len(ids) == 0 {
+	if set == nil || len(ids) == 0 || t.distrusted() {
 		return
 	}
 	trees := make([]index.SnapshotTree, len(ids))
@@ -123,4 +127,10 @@ func (t *SqlTable) discardSnapshotFiles(heapPath string) {
 	path := snapshotPathFor(heapPath)
 	_ = removeSnapshotFile(path)
 	_ = removeSnapshotFile(path + ".tmp")
+}
+
+func (t *SqlTable) distrusted() bool {
+	t.idx.mu.Lock()
+	defer t.idx.mu.Unlock()
+	return t.idx.distrust
 }
