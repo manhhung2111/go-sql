@@ -348,3 +348,40 @@ func TestStartup_ARenameThatCrashedKeepsTheDefinitions(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateIndex_AFailedCatalogWriteLeavesNoDefinition(t *testing.T) {
+	_, c, e := newIndexEngine(t)
+	storeOf(c).indexes = &failingFile{File: storeOf(c).indexes, failInserts: true}
+
+	err := execError(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+
+	assert.ErrorIs(t, err, errInjected)
+	assert.Empty(t, defsOf(t, c, "people"), "the definition is added only after its row is durable")
+}
+
+func TestCreateIndex_AFailedIndexCopyLeavesTheTableUnrenamed(t *testing.T) {
+	dir, c, e := newIndexEngine(t)
+	mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+	ff := &failingFile{File: storeOf(c).indexes}
+	storeOf(c).indexes = ff
+	ff.failInserts = true
+
+	err := execError(t, e, "shop", "ALTER TABLE people RENAME TO humans")
+
+	assert.ErrorIs(t, err, errInjected)
+	ff.failInserts = false
+	c, e = restart(t, dir, c)
+	assert.True(t, hasTable(t, c, "shop", "people"), "the table row is replaced only after the index rows are copied")
+	assert.False(t, hasTable(t, c, "shop", "humans"))
+	assert.Equal(t, []indexDef{{"by_name", "name"}}, defsOf(t, c, "people"))
+	_ = e
+}
+
+func TestDropTable_RemovesItsIndexRows(t *testing.T) {
+	_, c, e := newIndexEngine(t)
+	mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+
+	mustExec(t, e, "shop", "DROP TABLE people")
+
+	assert.Empty(t, sysIndexRecords(t, storeOf(c)))
+}
