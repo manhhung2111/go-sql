@@ -78,6 +78,8 @@ Walking the AND chain, every comparison is validated as in part B. A comparison 
 
 - Everything the scan reports is still reported by the scan, because a range lookup is used only for a `WHERE` that cannot fail.
 - A range with too many rows, an empty tree column, a stale entry or an unbounded comparison simply scans.
+- A lookup trusts that the index has every key whose row exists. A range widens the effect of a missing entry from one key to every key in the range: a range `DELETE` would skip a row whose entry is missing. Write maintenance and the differential test guard against that, as for equality lookups.
+- Only the first range on a column that has a tree is used. If it holds more rows than the cap, the statement scans even when a later range in the same `WHERE` would be small (`id > 0 AND email < 'b'`). That is a performance choice, not a correctness one.
 - A `Get` error other than `ErrRowNotFound` is returned.
 
 ## Out of scope (YAGNI)
