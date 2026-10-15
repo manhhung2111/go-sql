@@ -7,35 +7,34 @@ sources:
   - internal/engine/catalogcleanup.go
   - internal/engine/schemacodec.go
   - internal/engine/files.go
+  - docs/specs/2026-10-15-create-index-design.md
+  - docs/specs/2026-10-15-on-disk-index-design.md
   - pr: 14
   - pr: 15
   - pr: 16
-updated: 09d8ab0
+  - pr: 43
+  - pr: 45
+updated: 33c2c35
 ---
 # Catalog persistence subsystem
 
-Databases and tables survive a restart. The catalog was made durable in three PRs: #14 (schema codec, file ids, durable directory creation), #15 (writing the catalog on every DDL statement) and #16 (loading it at startup and recovering from crashes).
+Databases, tables, index definitions, and index snapshots survive a restart. System heap files under `<storage.data_dir>/sys/`: `sys_databases.tbl`, `sys_tables.tbl`, and `sys_indexes.tbl`.
 
 ## Where it lives
 
-Two system heap files under `<storage.data_dir>/sys/`: `sys_databases.tbl` with column `name`, and `sys_tables.tbl` with columns `db`, `name`, `file_id` and `schema` (JSON). Their own schemas are hard-coded. `catalogStore` owns them and remembers where each live row is (`dbRows`, `tableRows`), so a row can be tombstoned without scanning.
+`sys_indexes` records named secondary-index definitions (`db`, `tbl`, `name`, `col`). `catalogStore` owns all three system files.
 
 ## Write side
 
-Every DDL statement writes its catalog row and fsyncs before changing memory: [catalog row is the commit point](../decisions/catalog-row-is-the-commit-point.md). Replacing a row is insert, sync, tombstone, sync: [replace-row ordering](../decisions/replace-row-insert-then-tombstone.md). Schemas are JSON with stable tags: [schema codec](../decisions/schema-json-stable-tags.md). Directory creation fsyncs the directory, each ancestor up to the data directory, and its parent, so a catalog row never points into a directory a power loss forgets (`makeDir`).
+Every DDL statement writes its catalog row and fsyncs before changing memory: [catalog row is the commit point](../decisions/catalog-row-is-the-commit-point.md). Replacing a row is insert, sync, tombstone, sync: [replace-row ordering](../decisions/replace-row-insert-then-tombstone.md). Index definitions for renames write new index rows before replacing table rows.
 
 ## Startup (`NewCatalog`)
 
-1. `newFileAllocator` scans existing files to continue file ids after the highest one.
-2. `openCatalogStore` opens or creates the two system files; it does not read rows.
-3. `catalogStore.load` reads `sys_databases` (a repeated name keeps the first row), then `sys_tables`: rows for unknown databases are stale, and a later row displaces a survivor sharing its `(db, name)` or `file_id`. Losers are tombstoned after the scans. Each surviving table's schema is decoded and its file opened.
-4. `removeOrphans` deletes files no survivor references: [orphan removal](../decisions/orphan-removal-by-file-id.md).
-5. A live row whose file is missing or torn, or a damaged system file, refuses startup rather than guessing, and every file already opened is closed again.
+1. `newFileAllocator` scans existing `.tbl`, `.idx`, and `.idx.tmp` files to continue file IDs after the highest one.
+2. `openCatalogStore` opens system files.
+3. `catalogStore.load` reads databases, tables, and index definitions. Index definitions are validated against surviving tables and columns.
+4. `removeOrphans` deletes table files and index snapshots no survivor references.
 
 ## Shutdown
 
-`Catalog.Close()` closes every database's table files and the store. `cmd/server` runs it through the cleanup function from `wiring.InitializeServer` after `GracefulStop` and on every other exit path.
-
-## Limits
-
-A schema larger than one page cannot be created. A damaged page inside a table file shows up when that table is first scanned, not at startup (#16).
+`Catalog.Close()` closes every table's files and saves index trees to `<file_id>.idx` snapshots.

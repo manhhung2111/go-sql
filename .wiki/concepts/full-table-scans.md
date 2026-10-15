@@ -1,33 +1,38 @@
 ---
-title: Full-table scans until an index exists
+title: Point and range lookups via indexes, full-table scans as fallback
 kind: concept
 sources:
   - internal/engine/table.go
+  - internal/engine/lookup.go
   - internal/storage/file.go
   - pr: 12
-updated: 09d8ab0
+  - pr: 37
+  - pr: 38
+  - pr: 39
+  - pr: 41
+  - pr: 44
+updated: 33c2c35
 ---
-# Full-table scans until an index exists
+# Point and range lookups via indexes, full-table scans as fallback
 
 ## Rule
 
-There are no indexes. Every statement that has to find rows reads the whole table file a page at a time.
+Primary key, unique, and secondary columns have in-memory B+ tree indexes that serve point equality lookups (`=`) and bounded range lookups (under the page-count rule: fetched rows lie on at most half of the file's pages). Unindexed queries, wide ranges, and non-equality/non-bounded conditions fall back to full-table scans.
 
 ## Why it matters
 
-Memory stays small (it grows with the statement's own result or key set, not the table), but time grows with table size. The space of tombstoned rows is also not reclaimed, so scans read dead slots too (#12 lists both as known costs).
+Point and range lookups bypass full-table scans, reducing latency from milliseconds to microseconds on large tables. Scans remain the robust fallback for unindexed queries and range scans spanning most of the table.
 
 ## Where it applies
 
-- `Select`: streams the file under the table's read lock, filters with `evalWhere`, and keeps only matching, projected rows.
-- `Update` and `Delete`: scan to find matching rows.
-- PRIMARY KEY / UNIQUE checks on `InsertValues`, `Update` and `ADD COLUMN`: `existingKeys` streams the file once against a small set of the statement's own candidate key values.
-- `ADD COLUMN` / `DROP COLUMN`: stream the old file into a new one.
+- `Select`, `Update`, `Delete`: use index lookups (`lookupRows`) when the WHERE clause pins or bounds an indexed key column safely.
+- Uniqueness checks (`InsertValues`, `Update`): use index lookups instead of streaming the table file.
+- Unindexed queries, wide ranges, or complex predicates: stream the file via `storage.File.Scan()`.
 
 ## How to follow it when adding code
 
-Use `storage.File.Scan()` and decode one row at a time; do not load a whole table into memory. If an index is added, the uniqueness checks and `WHERE pk = ?` lookups are the first users. UPDATE moves rows to the end of the file, so an index would have to track new row ids.
+When adding statement types or query predicates, leverage `planLookup` and `lookupRows` where index access is applicable, while preserving full-table scan fallback for unmatched queries.
 
 ## Verified by
 
-Nothing measures scan cost. The engine tests assert behaviour, not complexity.
+Comprehensive differential and unit tests comparing indexed and unindexed table executions statement by statement.
