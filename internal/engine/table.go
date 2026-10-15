@@ -20,6 +20,10 @@ type Table interface {
 	Update(assignments []parser.Assignment, where parser.Expression) error
 	// Rename records the new name in the catalog, then sets it.
 	Rename(name string) error
+	// CreateIndex records a secondary-index definition in the catalog.
+	CreateIndex(name, column string, ifNotExists bool) error
+	// DropIndex removes a secondary-index definition from the catalog.
+	DropIndex(name string, ifExists bool) error
 	// Close releases the table's file. It is idempotent.
 	Close() error
 	// Drop closes the table's file and deletes it. It is idempotent.
@@ -706,6 +710,9 @@ func (t *SqlTable) dropColumn(name string) error {
 	if len(t.Columns) == 1 {
 		return fmt.Errorf("cannot drop the only column")
 	}
+	if at := slices.IndexFunc(t.indexDefs, func(d indexDef) bool { return d.column == name }); at >= 0 {
+		return fmt.Errorf("cannot drop column %q: index %q uses it", name, t.indexDefs[at].name)
+	}
 
 	newColumns := append(append([]parser.ColumnDefinition{}, t.Columns[:idx]...), t.Columns[idx+1:]...)
 	tf, err := t.rebuildAndRecord(newColumns, func(row []any) []any {
@@ -751,10 +758,22 @@ func (t *SqlTable) renameColumn(oldName, newName string) error {
 	if err != nil {
 		return err
 	}
-	if err := t.store.replaceTable(t.database, t.Name, t.Name, row); err != nil {
+	staged, err := t.store.stageIndexRows(t.database, t.Name, t.Name, map[string]string{oldName: newName})
+	if err != nil {
 		return err
 	}
+	if err := t.store.replaceTable(t.database, t.Name, t.Name, row); err != nil {
+		t.store.abortStaged(staged)
+		return err
+	}
+	t.store.commitStaged(staged)
 	t.Columns = newColumns
+	t.indexDefs = slices.Clone(t.indexDefs)
+	for i := range t.indexDefs {
+		if t.indexDefs[i].column == oldName {
+			t.indexDefs[i].column = newName
+		}
+	}
 	return nil
 }
 
@@ -1048,9 +1067,17 @@ func (t *SqlTable) Rename(name string) error {
 	if err != nil {
 		return err
 	}
-	if err := t.store.replaceTable(t.database, t.Name, name, row); err != nil {
+	// The index rows are copied under the new name first, so a crash at any
+	// point leaves either the old or the new rows valid; see stageIndexRows.
+	staged, err := t.store.stageIndexRows(t.database, t.Name, name, nil)
+	if err != nil {
 		return err
 	}
+	if err := t.store.replaceTable(t.database, t.Name, name, row); err != nil {
+		t.store.abortStaged(staged)
+		return err
+	}
+	t.store.commitStaged(staged)
 	t.Name = name
 	return nil
 }

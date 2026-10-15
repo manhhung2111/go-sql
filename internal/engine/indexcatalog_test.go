@@ -187,3 +187,164 @@ func TestStartup_IndexRowsAreResolvedAgainstTheTables(t *testing.T) {
 		assert.Equal(t, []indexDef{{name: "dup", column: "age"}}, definitions(t, c))
 	})
 }
+
+const peopleDDL = "CREATE TABLE people (id INT PRIMARY KEY, name VARCHAR(20), age INT)"
+
+func newIndexEngine(t *testing.T) (string, Catalog, Engine) {
+	dir := t.TempDir()
+	c := newTestCatalogAt(t, dir)
+	e := NewEngine(c)
+	mustExec(t, e, "", "CREATE DATABASE shop")
+	mustExec(t, e, "shop", peopleDDL)
+	return dir, c, e
+}
+
+func defsOf(t *testing.T, c Catalog, table string) []indexDef {
+	t.Helper()
+	db, err := c.GetDatabase("shop")
+	require.NoError(t, err)
+	tbl, ok := db.GetTable(table)
+	require.True(t, ok)
+	return tbl.(*SqlTable).indexDefs
+}
+
+func TestCreateIndex_StatementAndErrors(t *testing.T) {
+	_, c, e := newIndexEngine(t)
+
+	mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+	assert.Equal(t, []indexDef{{"by_name", "name"}}, defsOf(t, c, "people"))
+
+	t.Run("a repeated name is an error unless IF NOT EXISTS", func(t *testing.T) {
+		assert.ErrorContains(t, execError(t, e, "shop", "CREATE INDEX by_name ON people (age)"),
+			`index "by_name" already exists on table "people"`)
+		mustExec(t, e, "shop", "CREATE INDEX IF NOT EXISTS by_name ON people (age)")
+		assert.Equal(t, []indexDef{{"by_name", "name"}}, defsOf(t, c, "people"))
+	})
+	t.Run("an unknown column or table", func(t *testing.T) {
+		assert.ErrorContains(t, execError(t, e, "shop", "CREATE INDEX x ON people (nope)"), `unknown column "nope"`)
+		assert.ErrorContains(t, execError(t, e, "shop", "CREATE INDEX x ON nope (id)"), `table "nope" does not exist`)
+	})
+	t.Run("a key column and several indexes on one column are fine", func(t *testing.T) {
+		mustExec(t, e, "shop", "CREATE INDEX by_id ON people (id)")
+		mustExec(t, e, "shop", "CREATE INDEX by_name2 ON people (name)")
+		assert.Len(t, defsOf(t, c, "people"), 3)
+	})
+	t.Run("drop", func(t *testing.T) {
+		mustExec(t, e, "shop", "DROP INDEX by_name2 ON people")
+		assert.Len(t, defsOf(t, c, "people"), 2)
+		assert.ErrorContains(t, execError(t, e, "shop", "DROP INDEX by_name2 ON people"),
+			`index "by_name2" does not exist on table "people"`)
+		mustExec(t, e, "shop", "DROP INDEX IF EXISTS by_name2 ON people")
+	})
+}
+
+func TestCreateIndex_SurvivesARestart(t *testing.T) {
+	dir, c, e := newIndexEngine(t)
+	mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+	mustExec(t, e, "shop", "CREATE INDEX by_age ON people (age)")
+	mustExec(t, e, "shop", "DROP INDEX by_age ON people")
+
+	c, e = restart(t, dir, c)
+
+	assert.Equal(t, []indexDef{{"by_name", "name"}}, defsOf(t, c, "people"))
+	_ = e
+}
+
+func TestCreateIndex_FollowsRenamesAndDrops(t *testing.T) {
+	t.Run("RENAME TO", func(t *testing.T) {
+		dir, c, e := newIndexEngine(t)
+		mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+
+		mustExec(t, e, "shop", "ALTER TABLE people RENAME TO humans")
+		c, _ = restart(t, dir, c)
+
+		assert.Equal(t, []indexDef{{"by_name", "name"}}, defsOf(t, c, "humans"))
+	})
+	t.Run("RENAME COLUMN", func(t *testing.T) {
+		dir, c, e := newIndexEngine(t)
+		mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+
+		mustExec(t, e, "shop", "ALTER TABLE people RENAME COLUMN name TO full_name")
+		assert.Equal(t, []indexDef{{"by_name", "full_name"}}, defsOf(t, c, "people"))
+		c, _ = restart(t, dir, c)
+
+		assert.Equal(t, []indexDef{{"by_name", "full_name"}}, defsOf(t, c, "people"))
+	})
+	t.Run("DROP COLUMN of an indexed column is refused, of another is not", func(t *testing.T) {
+		_, c, e := newIndexEngine(t)
+		mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+
+		err := execError(t, e, "shop", "ALTER TABLE people DROP COLUMN name")
+		assert.ErrorContains(t, err, `cannot drop column "name": index "by_name" uses it`)
+		mustExec(t, e, "shop", "ALTER TABLE people DROP COLUMN age")
+
+		assert.Equal(t, []indexDef{{"by_name", "name"}}, defsOf(t, c, "people"))
+	})
+	t.Run("DROP TABLE then CREATE TABLE of the same name starts with no indexes, also after a restart", func(t *testing.T) {
+		dir, c, e := newIndexEngine(t)
+		mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+
+		mustExec(t, e, "shop", "DROP TABLE people")
+		mustExec(t, e, "shop", peopleDDL)
+		assert.Empty(t, defsOf(t, c, "people"))
+		c, _ = restart(t, dir, c)
+
+		assert.Empty(t, defsOf(t, c, "people"))
+	})
+	t.Run("DROP DATABASE removes the rows", func(t *testing.T) {
+		dir, c, e := newIndexEngine(t)
+		mustExec(t, e, "shop", "CREATE INDEX by_name ON people (name)")
+
+		mustExec(t, e, "", "DROP DATABASE shop")
+		mustExec(t, e, "", "CREATE DATABASE shop")
+		mustExec(t, e, "shop", peopleDDL)
+		c, _ = restart(t, dir, c)
+
+		assert.Empty(t, defsOf(t, c, "people"))
+	})
+}
+
+func TestCreateIndex_OnADroppedTableFailsWithoutTouchingTheCatalog(t *testing.T) {
+	_, c, e := newIndexEngine(t)
+	db, err := c.GetDatabase("shop")
+	require.NoError(t, err)
+	table, _ := db.GetTable("people")
+	mustExec(t, e, "shop", "DROP TABLE people")
+
+	err = table.CreateIndex("late", "name", false)
+
+	assert.ErrorContains(t, err, "is closed")
+}
+
+// Crash states for RENAME TO, written by hand: the staged rows exist under the
+// new name while the table row still has the old one, and the reverse.
+func TestStartup_ARenameThatCrashedKeepsTheDefinitions(t *testing.T) {
+	named := func(name string) parser.ColumnDefinition {
+		return parser.ColumnDefinition{Name: name, DataType: parser.IntDataType{}}
+	}
+	for _, tc := range []struct {
+		name, tableRow string
+	}{
+		{"before the table row was replaced", "users"},
+		{"after the table row was replaced, before the old rows were tombstoned", "people"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCrashFixture(t)
+			f.database("shop")
+			f.file("shop", 1)
+			require.NoError(t, f.store.addTable("shop", tc.tableRow, mustEncodeTableRow(t, "shop", tc.tableRow, 1, []parser.ColumnDefinition{named("id")})))
+			require.NoError(t, f.store.addIndex("shop", "users", "i", "id"))
+			require.NoError(t, f.store.addIndex("shop", "people", "i", "id"))
+
+			c := f.mustOpen()
+
+			db, err := c.GetDatabase("shop")
+			require.NoError(t, err)
+			table, ok := db.GetTable(tc.tableRow)
+			require.True(t, ok)
+			assert.Equal(t, []indexDef{{"i", "id"}}, table.(*SqlTable).indexDefs)
+			store := newTestStoreAt(t, f.dir)
+			assert.Len(t, sysIndexRecords(t, store), 1, "the other copy is gone")
+		})
+	}
+}
