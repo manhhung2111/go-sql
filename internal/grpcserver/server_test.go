@@ -2,7 +2,9 @@ package grpcserver
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -401,4 +403,53 @@ func TestParseQuery_InvalidStatements(t *testing.T) {
 			assert.Equal(t, tt.errorContains, resp.GetErrorMessage())
 		})
 	}
+}
+
+// Every request goes through one shared parser, so concurrent clients must not
+// be able to disturb one another's statements: before the parser kept its state
+// per call, this crashed the server or ran garbled statements.
+func TestParseQuery_ConcurrentClients(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	for _, sql := range []string{"CREATE DATABASE shop"} {
+		resp, err := client.ParseQuery(ctx, &sqlpb.QueryRequest{Sql: sql})
+		require.NoError(t, err)
+		require.Equal(t, sqlpb.StatusCode_OK, resp.Code, resp.ErrorMessage)
+	}
+	resp, err := client.ParseQuery(ctx, &sqlpb.QueryRequest{Sql: "CREATE TABLE items (id INT PRIMARY KEY, label VARCHAR(30))", Database: "shop"})
+	require.NoError(t, err)
+	require.Equal(t, sqlpb.StatusCode_OK, resp.Code, resp.ErrorMessage)
+
+	const clients, perClient = 8, 150
+	var wg sync.WaitGroup
+	errs := make(chan string, clients)
+	for c := 0; c < clients; c++ {
+		wg.Add(1)
+		go func(c int) {
+			defer wg.Done()
+			for i := 0; i < perClient; i++ {
+				id := c*1000 + i
+				label := fmt.Sprintf("c%d-%d", c, i)
+				ins, err := client.ParseQuery(ctx, &sqlpb.QueryRequest{Sql: fmt.Sprintf("INSERT INTO items (id, label) VALUES (%d, '%s')", id, label), Database: "shop"})
+				if err != nil || ins.Code != sqlpb.StatusCode_OK {
+					errs <- fmt.Sprintf("insert %d: %v %v", id, err, ins)
+					return
+				}
+				sel, err := client.ParseQuery(ctx, &sqlpb.QueryRequest{Sql: fmt.Sprintf("SELECT label FROM items WHERE id = %d", id), Database: "shop"})
+				if err != nil || sel.Code != sqlpb.StatusCode_OK || len(sel.Rows) != 1 || sel.Rows[0].Values[0] != label {
+					errs <- fmt.Sprintf("select %d: %v %v", id, err, sel)
+					return
+				}
+			}
+		}(c)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
+	}
+
+	count, err := client.ParseQuery(ctx, &sqlpb.QueryRequest{Sql: "SELECT id FROM items", Database: "shop"})
+	require.NoError(t, err)
+	assert.Len(t, count.Rows, clients*perClient)
 }

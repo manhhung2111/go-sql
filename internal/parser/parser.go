@@ -18,8 +18,14 @@ func NewParser(lexer Lexer) Parser {
 	return &sqlParser{lexer: lexer, pos: 0}
 }
 
+// Parse is called by every request through one shared Parser, so the token
+// stream and position live in a fresh sqlParser per call, never on the shared
+// one.
 func (s *sqlParser) Parse(sqlStatement string) (SqlStatement, error) {
-	// Parse is re-runnable
+	return (&sqlParser{lexer: s.lexer}).parse(sqlStatement)
+}
+
+func (s *sqlParser) parse(sqlStatement string) (SqlStatement, error) {
 	s.tokens = s.lexer.Lexing(sqlStatement)
 	s.pos = 0
 
