@@ -5,7 +5,7 @@ sources:
   - internal/parser/
   - docs/specs/2026-10-15-create-index-design.md
   - pr: 43
-updated: 33c2c35
+updated: ccd99ab
 ---
 # internal/parser
 
@@ -43,7 +43,7 @@ Standard library plus `github.com/google/wire` (only in `wireset.go`). It never 
 
 ## Gotchas
 
-- `sqlParser` stores `tokens` and `pos` on the struct and `sqlLexer` stores `runes` and `pos`; `Parse` and `Lexing` reset them on each call. The code has no locking, and `grpcserver.Server` holds a single parser instance, so concurrent `Parse` calls would share that state. See [SQL passed per call](../decisions/parser-takes-sql-per-call.md).
+- `Lexing` and `Parse` allocate a fresh `sqlLexer` and `sqlParser` struct per call, so the shared parser and lexer instances held by `grpcserver.Server` are safe for concurrent use without locking. See [SQL passed per call](../decisions/parser-takes-sql-per-call.md).
 - Literal values stay raw `Token`s; the engine coerces them. See [literal coercion](../concepts/literal-coercion.md).
 - `INDEX` and `ON` are reserved words since #43, so a column or table named `index` or `on` no longer parses. Only a single column, non-unique index is accepted; there is no `UNIQUE` or composite form.
 - `Lexing` has a `TODO: handle negative number` comment, so negative numeric literals are not handled.

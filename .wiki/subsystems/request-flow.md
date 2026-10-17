@@ -7,7 +7,7 @@ sources:
   - internal/grpcserver/server.go
   - proto/sqlpb/sql.proto
   - internal/config/
-updated: 09d8ab0
+updated: ccd99ab
 ---
 # Request flow subsystem
 
@@ -32,4 +32,4 @@ On SIGINT or SIGTERM, `main` calls `GracefulStop()` and then the cleanup functio
 
 ## Watch out for
 
-The server shares one parser instance across requests: [lexer and parser take the SQL per call](../decisions/parser-takes-sql-per-call.md).
+The server shares one parser instance across requests, which is safe for concurrent use because `Lexing` and `Parse` allocate fresh instances per call: [lexer and parser take the SQL per call](../decisions/parser-takes-sql-per-call.md).

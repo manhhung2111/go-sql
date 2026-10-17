@@ -4,7 +4,7 @@ kind: subsystem
 sources:
   - internal/parser/
   - pr: 43
-updated: 33c2c35
+updated: ccd99ab
 ---
 # Parser subsystem
 
@@ -25,4 +25,4 @@ The parser is the bottom layer: `internal/parser` turns a SQL string into an AST
 
 ## Rules for changes
 
-[Peek before advance](../concepts/peek-before-advance.md). Add a new statement as a struct, a `Parse` case and an `Execute` case together. The parser instance carries per-call state, see [lexer and parser take the SQL per call](../decisions/parser-takes-sql-per-call.md).
+[Peek before advance](../concepts/peek-before-advance.md). Add a new statement as a struct, a `Parse` case and an `Execute` case together. `Lexing` and `Parse` allocate a fresh lexer and parser instance per call to ensure concurrent safety, see [lexer and parser take the SQL per call](../decisions/parser-takes-sql-per-call.md).
