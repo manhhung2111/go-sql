@@ -54,9 +54,14 @@ func (l *sqlLexer) skipWhitespace() {
 	}
 }
 
+// Lexing is called by every request through one shared Lexer, so the scan
+// state (runes and pos) lives in a fresh sqlLexer per call, never on the shared
+// one.
 func (l *sqlLexer) Lexing(sqlStatement string) []Token {
-	l.pos = 0 // Lexing is re-runnable: reset scan position each call
-	l.runes = []rune(sqlStatement)
+	return (&sqlLexer{runes: []rune(sqlStatement)}).lex()
+}
+
+func (l *sqlLexer) lex() []Token {
 	tokens := make([]Token, 0)
 
 	for {
