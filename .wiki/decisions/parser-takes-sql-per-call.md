@@ -8,7 +8,7 @@ sources:
   - internal/parser/wireset.go
   - internal/wiring/wire.go
   - CLAUDE.md
-updated: 09d8ab0
+updated: ccd99ab
 ---
 # Lexer and parser take the SQL per call
 
@@ -18,11 +18,11 @@ Google Wire builds the dependency graph once at startup, before any request's SQ
 
 ## Decision
 
-`NewLexer()` and `NewParser(lexer)` take no runtime arguments; the SQL string is passed per call (`Lexing(sql)`, `Parse(sql)`). This lets both be wired as long-lived singletons (`CLAUDE.md`). Both reset their scan state at the start of each call (`l.pos = 0`, `s.pos = 0`).
+`NewLexer()` and `NewParser(lexer)` take no runtime arguments; the SQL string is passed per call (`Lexing(sql)`, `Parse(sql)`). This lets both be wired as long-lived singletons (`CLAUDE.md`). Both allocate a fresh `sqlLexer` and `sqlParser` instance per call.
 
 ## Consequences
 
-- `sqlParser` keeps `tokens` and `pos` on the struct and `sqlLexer` keeps `runes` and `pos`, so a single instance holds per-request state. The code has no synchronization, and `grpcserver.Server` uses one parser for every request; concurrent `Parse` calls would share that state. No source records whether this was considered.
+- `Lexing` and `Parse` allocate a fresh `sqlLexer` and `sqlParser` instance per call rather than mutating fields on the shared instance, ensuring that concurrent requests through the shared singletons do not interfere.
 - A parser test can call `Parse` repeatedly on one instance.
 
 ## Alternatives
