@@ -31,6 +31,8 @@ go run ./cmd/server                    # reads internal/config/config.yml by def
 go run ./cmd/server -config <path>      # or set CONFIG_PATH env var
 ```
 
+`.github/workflows/docker.yml` smoke-tests the image on every PR; on push to `main` it then pushes the tested image to Docker Hub as `sha-<short sha>` and `latest` (needs the `DOCKERHUB_USERNAME` repository variable and `DOCKERHUB_TOKEN` secret).
+
 `vendor/` is populated locally (`go mod vendor`) but gitignored, not committed.
 
 ## Architecture

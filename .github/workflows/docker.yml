@@ -4,13 +4,23 @@ on:
   pull_request:
     branches:
       - main
+  # A merged PR is a push to main: build, smoke-test and publish the image.
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Only PR runs are cancelled; a second quick merge must not cancel a publish half-way.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Docker Hub repository; DOCKERHUB_USERNAME is a repository variable. PR runs never
+  # push, so they fall back to a placeholder when it is unset.
+  IMAGE: docker.io/${{ vars.DOCKERHUB_USERNAME || 'local' }}/go-sql
 
 jobs:
   docker:
@@ -23,13 +33,28 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # sha-<short sha> is immutable and names the exact commit; latest moves with main.
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Loaded locally, never pushed from here: the publish steps below push this
+      # same image only after the smoke test has passed on it.
       - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .
           load: true
           push: false
-          tags: go-sql:ci
+          tags: |
+            go-sql:ci
+            ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -79,6 +104,39 @@ jobs:
             echo "the server did not log a graceful stop"
             exit 1
           fi
+
+      - name: Check the Docker Hub credentials
+        if: github.event_name == 'push'
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ]; then
+            echo "::error::The DOCKERHUB_USERNAME repository variable is not set."
+            exit 1
+          fi
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::The DOCKERHUB_TOKEN repository secret is not set."
+            exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push image
+        if: github.event_name == 'push'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          echo "## Published" >> "$GITHUB_STEP_SUMMARY"
+          for tag in $TAGS; do
+            docker push "$tag"
+            echo "- \`$tag\`" >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: Container logs
         if: always()
