@@ -16,7 +16,8 @@ sources:
   - pr: 28
   - pr: 29
   - pr: 30
-updated: 7660bd0
+  - pr: 49
+updated: 01306f5
 ---
 # Build, CI and deployment subsystem
 
@@ -26,10 +27,10 @@ The multi-stage `Dockerfile` builds a static binary (`CGO_ENABLED=0`, `-trimpath
 
 ## CI
 
-`ci.yml` and `docker.yml` trigger only on pull requests into `main`, so stacked PRs are not checked until they are retargeted (#18). `sync-wiki.yml` is different: it runs on pushes to `main`.
+`ci.yml` triggers on pull requests into `main` (#18), while `docker.yml` triggers on both pull requests and pushes to `main` (#49). `sync-wiki.yml` runs on pushes to `main`.
 
 - `ci.yml`: `gofmt -l .` must print nothing, then `go vet ./...`, `go build ./...`, `go test -race ./...`.
-- `docker.yml`: builds the image (not pushed), checks it does not run as root, starts it, waits for the server to answer, stops it with SIGTERM and requires exit code 0 and a `server stopped` log line. The readiness check sends a real HTTP/2 request with `curl` because Docker's port proxy accepts connections even when nothing answers behind it (#18).
+- `docker.yml`: builds the image, checks it does not run as root, starts it, waits for the server to answer, stops it with SIGTERM and requires exit code 0 and a `server stopped` log line. The readiness check sends a real HTTP/2 request with `curl` because Docker's port proxy accepts connections even when nothing answers behind it (#18). On PRs, the image is loaded locally and not pushed. On push to `main`, after the smoke test passes, it logs into Docker Hub using `DOCKERHUB_USERNAME` (repo variable) and `DOCKERHUB_TOKEN` (secret) and pushes the image tagged `sha-<short sha>` (immutable) and `latest` (#49). Concurrency `cancel-in-progress` is restricted to PR runs (`${{ github.event_name == 'pull_request' }}`) so a second merge does not cancel an active publish (#49).
 - `sync-wiki.yml`: automated workflow running after pushes to `main` (or via `workflow_dispatch`) that executes the `/sync-wiki` skill with Gemini (`sync-wiki.yml`, #23, #27, #28, #29, #30). It sets `GEMINI_CLI_TRUST_WORKSPACE=true` for headless execution, tries models in `GEMINI_MODELS` in order with fallback on failure (503, quota, 404, timeout, or silence), caps retries via `general.maxAttempts: 3` to avoid exhausting daily quotas, lints with `.wiki/check.sh`, appends to `log.md`, and opens/updates a PR via `peter-evans/create-pull-request` with job summaries. The PR is opened with `GITHUB_TOKEN`, so CI workflows do not run on it; `.wiki/check.sh` has already passed in the job.
 
 ## Make targets

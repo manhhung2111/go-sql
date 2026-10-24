@@ -4,7 +4,8 @@ kind: code
 sources:
   - internal/grpcserver/
   - proto/sqlpb/sql.proto
-updated: 09d8ab0
+  - pr: 46
+updated: 01306f5
 ---
 # internal/grpcserver
 
@@ -39,7 +40,7 @@ Registered by `cmd/server` through `sqlpb.RegisterSqlParserServiceServer`. Calls
 
 ## Gotchas
 
-- `Server` holds one `parser.Parser` for all requests, and the parser keeps per-call state on itself. See [parser](parser.md).
+- `Server` holds one `parser.Parser` for all requests. The parser allocates fresh scan/parse state per call, so concurrent RPC requests cannot interfere with each other (#46). See [parser](parser.md).
 - `Server` stores `config` but `ParseQuery` does not use it.
 - The service is named `SqlParserService` in the proto even though `ParseQuery` also executes statements.
 
