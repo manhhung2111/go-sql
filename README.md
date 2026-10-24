@@ -28,7 +28,7 @@ docker build -t go-sql .
 docker run --rm -p 50051:50051 -v go-sql-data:/data go-sql
 ```
 
-The container keeps its files in the `/data` volume and runs as a non-root user. `docker stop` sends SIGTERM, which shuts the server down gracefully. CI builds the image on every pull request into `main`, starts it, stops it with SIGTERM and requires a clean exit.
+The container keeps its files in the `/data` volume and runs as a non-root user. `docker stop` sends SIGTERM, which shuts the server down gracefully. CI builds the image on every pull request into `main`, starts it, stops it with SIGTERM and requires a clean exit. Every push to `main` runs the same checks and then publishes the image to Docker Hub as `<user>/go-sql:sha-<short commit sha>` (immutable) and `<user>/go-sql:latest`.
 
 ### Try it
 
