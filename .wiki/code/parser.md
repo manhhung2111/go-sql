@@ -5,7 +5,8 @@ sources:
   - internal/parser/
   - docs/specs/2026-10-15-create-index-design.md
   - pr: 43
-updated: 33c2c35
+  - pr: 46
+updated: 01306f5
 ---
 # internal/parser
 
@@ -21,14 +22,15 @@ Standard library plus `github.com/google/wire` (only in `wireset.go`). It never 
 
 | File | Responsibility |
 | --- | --- |
-| `lexer.go` | `Lexer` interface, `NewLexer`, `Lexing(sql) []Token`; scans numbers, quoted strings, identifiers, symbols |
+| `lexer.go` | `Lexer` interface, `NewLexer`, `Lexing(sql) []Token`; delegates to a fresh `sqlLexer` per call to scan numbers, quoted strings, identifiers, symbols |
 | `token.go` | `TokenType` constants, reserved-word map (including `INDEX` and `ON`), `Token{Type, Value, Position}` |
-| `parser.go` | `Parser` interface, `NewParser`, `Parse`: dispatch on the first token, then `expectEnd` |
+| `parser.go` | `Parser` interface, `NewParser`, `Parse`: delegates to a fresh `sqlParser` per call, dispatches on first token, then `expectEnd` |
 | `parser_ddl.go` | CREATE/DROP DATABASE, SHOW DATABASES, CREATE/DROP/ALTER TABLE, `CREATE INDEX [IF NOT EXISTS] name ON table (column)`, `DROP INDEX [IF EXISTS] name ON table`, column definitions and constraints |
 | `parser_dml.go` | SELECT, INSERT INTO, UPDATE, DELETE |
 | `expression.go` | WHERE grammar: OR over AND over comparison; `BinaryExpression`, `ComparisonExpression` |
 | `ast_ddl.go`, `ast_dml.go` | Statement structs and `ColumnDefinition` (with `IsPrimaryKey`, `IsNotNull`, `IsUnique`, `RequiresValue`, `DefaultValue`) |
 | `constraints.go`, `datatypes.go` | Constraint and data type structs |
+| `concurrency_test.go` | Unit tests verifying concurrent `Lexing` and `Parse` execution safety (#46) |
 | `wireset.go` | `WireSet` providing `NewLexer` and `NewParser` |
 
 ## Key types and entry points
@@ -43,7 +45,7 @@ Standard library plus `github.com/google/wire` (only in `wireset.go`). It never 
 
 ## Gotchas
 
-- `sqlParser` stores `tokens` and `pos` on the struct and `sqlLexer` stores `runes` and `pos`; `Parse` and `Lexing` reset them on each call. The code has no locking, and `grpcserver.Server` holds a single parser instance, so concurrent `Parse` calls would share that state. See [SQL passed per call](../decisions/parser-takes-sql-per-call.md).
+- `Lexing` and `Parse` delegate to fresh `sqlLexer` and `sqlParser` instances per call, so the shared singletons hold no scan or parse state and are safe for concurrent use across gRPC requests without locking (#46). See [lexer and parser take the SQL per call](../decisions/parser-takes-sql-per-call.md).
 - Literal values stay raw `Token`s; the engine coerces them. See [literal coercion](../concepts/literal-coercion.md).
 - `INDEX` and `ON` are reserved words since #43, so a column or table named `index` or `on` no longer parses. Only a single column, non-unique index is accepted; there is no `UNIQUE` or composite form.
 - `Lexing` has a `TODO: handle negative number` comment, so negative numeric literals are not handled.

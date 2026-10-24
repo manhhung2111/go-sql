@@ -8,7 +8,8 @@ sources:
   - internal/parser/wireset.go
   - internal/wiring/wire.go
   - CLAUDE.md
-updated: 09d8ab0
+  - pr: 46
+updated: 01306f5
 ---
 # Lexer and parser take the SQL per call
 
@@ -18,11 +19,12 @@ Google Wire builds the dependency graph once at startup, before any request's SQ
 
 ## Decision
 
-`NewLexer()` and `NewParser(lexer)` take no runtime arguments; the SQL string is passed per call (`Lexing(sql)`, `Parse(sql)`). This lets both be wired as long-lived singletons (`CLAUDE.md`). Both reset their scan state at the start of each call (`l.pos = 0`, `s.pos = 0`).
+`NewLexer()` and `NewParser(lexer)` take no runtime arguments; the SQL string is passed per call (`Lexing(sql)`, `Parse(sql)`). This lets both be wired as long-lived singletons (`CLAUDE.md`). To ensure thread safety across concurrent requests, `Lexing` and `Parse` allocate fresh `sqlLexer` and `sqlParser` values per call, so the shared singletons hold no scan or parse state (#46).
 
 ## Consequences
 
-- `sqlParser` keeps `tokens` and `pos` on the struct and `sqlLexer` keeps `runes` and `pos`, so a single instance holds per-request state. The code has no synchronization, and `grpcserver.Server` uses one parser for every request; concurrent `Parse` calls would share that state. No source records whether this was considered.
+- The shared `Lexer` and `Parser` singletons are safe for concurrent use across gRPC requests without locking or request serialization (#46).
+- Unit and gRPC server integration tests verify that concurrent `Lexing` and `Parse` calls execute safely without data races or state corruption (`concurrency_test.go`, `server_test.go`, #46).
 - A parser test can call `Parse` repeatedly on one instance.
 
 ## Alternatives
